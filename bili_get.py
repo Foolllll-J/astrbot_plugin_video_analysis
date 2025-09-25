@@ -14,7 +14,7 @@ from astrbot.api import logger
 import requests
 
 # 添加Cookie相关配置
-COOKIE_FILE = "data/plugins/astrbot_plugin_videos_analysis/bili_cookies.json"
+COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
 
@@ -239,7 +239,7 @@ async def download_video(aid, cid, bvid, quality=16):
     if isinstance(video_data, dict):
         return None
 
-    filename = f"data/plugins/astrbot_plugin_videos_analysis/download_videos/bili/{bvid}.mp4"
+    filename = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}.mp4"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     async with aiofiles.open(filename, "wb") as f:
         await f.write(video_data)
@@ -415,7 +415,7 @@ async def bili_login(event=None):
     
 
     # 保存二维码图片到指定路径
-    image_dir = "data/plugins/astrbot_plugin_videos_analysis/image"
+    image_dir = "data/plugins/astrbot_plugin_video_analysis/image"
     os.makedirs(image_dir, exist_ok=True)
     image_path = os.path.join(image_dir, "bili_login_qrcode.png")
     with open(image_path, "wb") as f:
@@ -580,7 +580,7 @@ async def download_file(url, file_path, headers):
 async def download_video_with_cookie(aid, cid, bvid, quality=80, event=None):
     """使用Cookie下载高清视频并合成音视频"""
     # 检查是否已存在合成后的文件
-    output_file = f"data/plugins/astrbot_plugin_videos_analysis/download_videos/bili/{bvid}_output.mp4"
+    output_file = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}_output.mp4"
     if os.path.exists(output_file):
         log_callback(f"视频已存在，跳过下载和合成：{output_file}")
         return output_file
@@ -598,8 +598,8 @@ async def download_video_with_cookie(aid, cid, bvid, quality=80, event=None):
     }
 
     # 下载视频和音频
-    video_file = f"data/plugins/astrbot_plugin_videos_analysis/download_videos/bili/{bvid}_video.mp4"
-    audio_file = f"data/plugins/astrbot_plugin_videos_analysis/download_videos/bili/{bvid}_audio.mp3"
+    video_file = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}_video.mp4"
+    audio_file = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}_audio.mp3"
 
     os.makedirs(os.path.dirname(video_file), exist_ok=True)
 
@@ -673,7 +673,7 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
         return None
 
     # 检查本地是否已存在相同 bvid 的视频文件
-    video_file = f"data/plugins/astrbot_plugin_videos_analysis/download_videos/bili/{bvid}_output.mp4"
+    video_file = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}_output.mp4"
     if os.path.exists(video_file):
         log_callback(f"本地已存在视频文件：{video_file}，跳过下载")
         return {

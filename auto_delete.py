@@ -46,6 +46,6 @@ def delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
 
 if __name__ == "__main__":
     # 测试用的硬编码路径，实际使用时应该从配置中获取
-    TEST_FOLDER_PATH = "data/plugins/astrbot_plugin_videos_analysis/download_videos/dy"
+    TEST_FOLDER_PATH = "data/plugins/astrbot_plugin_video_analysis/download_videos/dy"
     TEST_TIME_THRESHOLD = 60
     delete_old_files(TEST_FOLDER_PATH, TEST_TIME_THRESHOLD)
