@@ -64,12 +64,6 @@ async def auto_parse_bili(self: videoAnalysis, event: AstrMessageEvent, *args, *
     message_str = event.message_str
     message_obj_str = str(event.message_obj)
 
-    # 1. 文件清理 (始终在最前面执行)
-    # 假设 bili_get.py 返回的路径总是 'data/plugins/astrbot_plugin_video_analysis/download_videos/bili' 开头
-    bili_download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
-    logger.info(f"开始清理B站旧文件，阈值：{self.delete_time}分钟 (目录: {bili_download_dir_rel})")
-    await async_delete_old_files(bili_download_dir_rel, self.delete_time)
-
     if re.search(r"reply", message_obj_str):
         logger.debug("消息是回复类型，跳过解析。")
         return
@@ -220,6 +214,10 @@ async def auto_parse_bili(self: videoAnalysis, event: AstrMessageEvent, *args, *
             else:
                 logger.warning("未获取到媒体组件，无法发送纯视频。")
                 yield event.plain_result("抱歉，未能下载到视频文件。")
+
+        bili_download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
+        logger.info(f"开始清理B站旧文件，阈值：{self.delete_time}分钟 (目录: {bili_download_dir_rel})")
+        await async_delete_old_files(bili_download_dir_rel, self.delete_time)
                 
     except Exception as e:
         # 捕获所有运行时异常并打印堆栈信息
