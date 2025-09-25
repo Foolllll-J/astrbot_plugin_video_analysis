@@ -183,7 +183,7 @@ async def bili_login(event=None):
     """B站扫码登录流程（新版API）"""
     log_callback("正在生成B站登录二维码..."); qr_data = await generate_qrcode()
     if not qr_data: return None
-    log_callback("\n请使用B站APP扫描以下二维码登录:");
+    log_callback("\n请使用B站APP扫描以下二维码登录:")
     qrcode_key = qr_data["qrcode_key"]
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=1, border=1)
     qr.add_data(qr_data["url"]); qr.make(fit=True)
@@ -244,8 +244,11 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, num_threads=8):
         raise Exception("yt-dlp is not installed or not found in PATH.")
 
     os.makedirs(download_dir, exist_ok=True)
-
-    # 1. 读取 JSON Cookie 文件
+    
+    # yt-dlp 下载链接，输出文件名为 BV号.mp4
+    output_template = os.path.join(download_dir, f"{bvid}.mp4")
+    
+    # 1. 转换 Cookie 为 Netscape 格式并写入临时文件
     try:
         async with aiofiles.open(cookies_file, "r", encoding="utf-8") as f:
             json_cookies = json.loads(await f.read())
@@ -253,98 +256,66 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, num_threads=8):
         log_callback(f"[ERROR] 无法读取或解析 JSON Cookie 文件: {cookies_file}. 错误: {e}")
         raise Exception("无法读取 Cookie 文件，请检查格式。")
 
-    # 2. 转换 Cookie 为 Netscape 格式并写入临时文件
     netscape_cookie_path = os.path.join(download_dir, "bili_netscape_temp.txt")
-    
-    # 假设所有 B站 Cookie 都是针对 bilibili.com 的，且路径为 /
     netscape_header = "# Netscape HTTP Cookie File\n"
     netscape_format = "{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n"
-    
     netscape_entries = netscape_header
-    
-    # ⚠️ 注意：这里是根据常见的 B 站 Cookie 字段进行硬编码转换，若有新的字段，可能需要更新
-    if 'SESSDATA' in json_cookies:
-        netscape_entries += netscape_format.format(
-            domain='.bilibili.com', flag='TRUE', path='/', secure='TRUE', expiration='0',
-            name='SESSDATA', value=json_cookies['SESSDATA']
-        )
-    if 'bili_jct' in json_cookies:
-        netscape_entries += netscape_format.format(
-            domain='.bilibili.com', flag='TRUE', path='/', secure='TRUE', expiration='0',
-            name='bili_jct', value=json_cookies['bili_jct']
-        )
-    # 添加其他必要的 cookies，如 DedeUserID, DedeUserID__ckMd5 等，格式保持一致
-    if 'DedeUserID' in json_cookies:
-        netscape_entries += netscape_format.format(
-            domain='.bilibili.com', flag='TRUE', path='/', secure='TRUE', expiration='0',
-            name='DedeUserID', value=json_cookies['DedeUserID']
-        )
+    cookies_to_convert = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5']
+
+    for name in cookies_to_convert:
+        if name in json_cookies:
+            netscape_entries += netscape_format.format(
+                domain='.bilibili.com', flag='TRUE', path='/', secure='TRUE', expiration='0',
+                name=name, value=json_cookies[name]
+            )
         
     async with aiofiles.open(netscape_cookie_path, "w", encoding="utf-8") as f:
         await f.write(netscape_entries)
     
-    # yt-dlp 下载链接，输出文件名为 BV号.mp4
-    output_template = os.path.join(download_dir, f"{bvid}.mp4")
-    
-    # 清理旧的缓存文件，避免 yt-dlp 报错或使用损坏的缓存
+    # 2. 清理旧的缓存文件
     if os.path.exists(output_template):
         os.remove(output_template)
 
+    # 3. 构建 yt-dlp 命令 (包含加速和模拟参数)
     cmd = [
         'yt-dlp',
         '--cookies', netscape_cookie_path, # <-- 使用 Netscape 格式的临时文件
-        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
-        '--merge-output-format', 'mp4',
-        '-N', str(num_threads), 
+        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best', # 格式选择
+        '--merge-output-format', 'mp4', 
+        '-N', str(num_threads), # 并行下载线程
         '--output', output_template,
-        '--force-overwrites',
+        '--force-overwrites', # 覆盖已有文件
+        
+        # --- 优化参数：增强健壮性与输出 ---
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        '--min-sleep-interval', '5', # 失败时随机等待 5-15 秒
+        '--max-sleep-interval', '15', # 随机等待的最大值 (5 到 15 秒)
         f'https://www.bilibili.com/video/{bvid}'
     ]
     
     log_callback(f"[DEBUG] yt-dlp CMD: {' '.join(cmd)}")
     
-    # 运行 yt-dlp
+    # 4. 运行 yt-dlp (使用标准的 asyncio 捕获)
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     
-    # --- 核心修复：使用 asyncio.wait_for 实时捕获输出并等待进程 ---
+    log_callback("[INFO] yt-dlp 进程已成功启动。请等待下载和合成...")
+    # --- 修复后的核心逻辑：直接等待进程完成，并捕获所有输出 ---
+    stdout_data, stderr_data = await process.communicate()
     
-    # 实时打印 yt-dlp 的输出 (在 stderr)
-    try:
-        while True:
-            # 使用 readline() 来读取进程的输出，直到遇到 EOF 或 EOL
-            line = await asyncio.wait_for(process.stderr.readline(), timeout=0.5)
-            if not line:
-                # 如果没有更多输出 (EOF)，则认为进程已经结束或准备结束
-                break
-            log_callback(f"[YT-DLP] {line.decode().strip()}")
-            
-    except asyncio.TimeoutError:
-        # 进程还在运行，但当前没有新输出，继续等待
-        pass
-    except Exception as e:
-        log_callback(f"[WARN] 读取 yt-dlp 输出时发生意外错误: {e}")
-        
-    await process.wait() # 确保进程完全结束
+    # 5. 检查退出码和清理
+    os.remove(netscape_cookie_path) # 始终清理临时文件
 
-    # --- 退出检查 (使用 process.returncode) ---
     if process.returncode != 0:
-        # 只有在退出码不为 0 时，才重新读取剩余的完整错误输出
-        error_output = (await process.stderr.read()).decode(errors='ignore').strip()
-        
-        # 打印完整的错误输出，而不是只打印前 1000 字符
-        if not error_output:
-             error_output = "FFmpeg/yt-dlp 静默失败，无错误信息。"
-             
+        error_output = stderr_data.decode(errors='ignore').strip()
         log_callback(f"[ERROR] yt-dlp 下载失败 (Exit Code: {process.returncode})")
-        log_callback(f"[ERROR] yt-dlp 错误输出: {error_output}")
-        
+        log_callback(f"[ERROR] yt-dlp 错误输出: {error_output[:1000]}...")
         raise Exception(f"yt-dlp 下载失败，请检查 FFmpeg 和 yt-dlp 日志。")
 
-    # 检查最终文件是否存在
+    # 6. 检查最终文件是否存在
     if os.path.exists(output_template):
         log_callback(f"[INFO] yt-dlp 下载并合成成功: {output_template}")
         return output_template
