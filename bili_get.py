@@ -14,7 +14,6 @@ from astrbot.api import logger
 import requests
 
 # 添加Cookie相关配置
-# **路径已修正为不带s的插件名**
 COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
@@ -240,7 +239,6 @@ async def download_video(aid, cid, bvid, quality=16):
     if isinstance(video_data, dict):
         return None
 
-    # **路径已修正为不带s的插件名**
     filename = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}.mp4"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     async with aiofiles.open(filename, "wb") as f:
@@ -341,7 +339,6 @@ async def generate_qrcode():
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
     
-    # **路径已修正为不带s的插件名**
     image_dir = "data/plugins/astrbot_plugin_video_analysis/image"
     os.makedirs(image_dir, exist_ok=True)
     image_path = os.path.join(image_dir, "bili_login_qrcode.png")

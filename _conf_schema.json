@@ -28,7 +28,7 @@
     "bili_reply_mode":{
         "description": "回复模式",
         "type": "int",
-        "default": 2,
+        "default": 4,
         "hint" :"0: 纯文本回复|1: 图片|2: 视频|3: 图片+视频|4: 纯视频回复"
     },
     "bili_url_mode":{
