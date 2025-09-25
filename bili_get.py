@@ -9,11 +9,12 @@ import qrcode
 from PIL import Image
 import base64
 from io import BytesIO
-from urllib.parse import unquote  # 添加这一行导入unquote函数
+from urllib.parse import unquote
 from astrbot.api import logger
 import requests
 
 # 添加Cookie相关配置
+# **路径已修正为不带s的插件名**
 COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
@@ -239,6 +240,7 @@ async def download_video(aid, cid, bvid, quality=16):
     if isinstance(video_data, dict):
         return None
 
+    # **路径已修正为不带s的插件名**
     filename = f"data/plugins/astrbot_plugin_video_analysis/download_videos/bili/{bvid}.mp4"
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     async with aiofiles.open(filename, "wb") as f:
@@ -339,6 +341,17 @@ async def generate_qrcode():
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
     
+    # **路径已修正为不带s的插件名**
+    image_dir = "data/plugins/astrbot_plugin_video_analysis/image"
+    os.makedirs(image_dir, exist_ok=True)
+    image_path = os.path.join(image_dir, "bili_login_qrcode.png")
+    with open(image_path, "wb") as f:
+        f.write(base64.b64decode(qr_data["image_base64"]))
+
+    # 提供备用显示方式
+    print(f"\n如果上方二维码显示异常，请查看二维码文件: {image_path}")
+    logger.info(f"二维码图片已保存到: {image_path}")
+    
     return {
         "qrcode_key": qrcode_key,
         "image_base64": img_str,
@@ -413,16 +426,8 @@ async def bili_login(event=None):
     logger.info("B站登录二维码已显示在控制台")
     logger.info(qr_text)
     
-
-    # 保存二维码图片到指定路径
-    image_dir = "data/plugins/astrbot_plugin_video_analysis/image"
-    os.makedirs(image_dir, exist_ok=True)
-    image_path = os.path.join(image_dir, "bili_login_qrcode.png")
-    with open(image_path, "wb") as f:
-        f.write(base64.b64decode(qr_data["image_base64"]))
-    # logger.info(f"二维码图片已保存到: {image_path}")
-
     # 提供备用显示方式
+    image_path = os.path.join("data/plugins/astrbot_plugin_video_analysis/image", "bili_login_qrcode.png")
     print(f"\n如果上方二维码显示异常，请查看二维码文件: {image_path}")
     logger.info(f"二维码图片已保存到: {image_path}")
     logger.info("如果无法扫描，可复制下方base64码用在线工具解析:")
@@ -618,15 +623,49 @@ async def download_video_with_cookie(aid, cid, bvid, quality=80, event=None):
     # 合成音视频
     log_callback("正在合成音视频...")
     await merge_audio_and_video(audio_file, video_file, output_file)
-
+    
+    # --- 【调试日志：列出目录内容】 ---
     log_callback(f"视频合成完成，保存为 {output_file}")
+    output_dir = os.path.dirname(output_file)
+    if os.path.isdir(output_dir):
+        file_list = os.listdir(output_dir)
+        log_callback(f"[DEBUG] Bili下载目录文件列表 ({output_dir}):")
+        for item in file_list:
+            log_callback(f"[DEBUG]   - {item}")
+    else:
+        log_callback(f"[ERROR] 目录不存在，无法列出文件: {output_dir}")
+    # --- 【调试日志结束】 ---
+    
     return output_file
 
 async def merge_audio_and_video(audio_file, video_file, output_file):
-    """异步合成音视频"""
-    cmd = f'ffmpeg -i "{audio_file}" -i "{video_file}" -acodec copy -vcodec copy "{output_file}"'
-    process = await asyncio.create_subprocess_shell(cmd)
-    await process.communicate()
+    """异步合成音视频，并检查 FFmpeg 退出码"""
+    
+    # 修正 FFmpeg 命令：使用 -c copy（通用复制）和 -y（覆盖文件）
+    # 同时使用 m4a 作为音频扩展名，提高兼容性
+    cmd = f'ffmpeg -i "{audio_file}" -i "{video_file}" -c copy -map 0:a -map 1:v "{output_file}" -y'
+    
+    log_callback(f"[DEBUG] FFmpeg CMD: {cmd}") # 打印执行的命令
+
+    # 使用 PIPE 捕获输出，以便在出错时查看原因
+    process = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    stdout, stderr = await process.communicate()
+    
+    if process.returncode != 0:
+        # 如果 FFmpeg 退出码不为 0，则抛出异常，让 Python 知道出错了
+        error_output = stderr.decode(errors='ignore').strip()
+        log_callback(f"[ERROR] FFmpeg 合成失败 (Exit Code: {process.returncode})")
+        log_callback(f"[ERROR] FFmpeg 错误输出: {error_output[:500]}...")
+        
+        # 抛出异常，让 main.py 知道并触发错误处理
+        raise Exception(f"FFmpeg 合成失败，请检查 FFmpeg 依赖和错误日志。")
+    
+    log_callback("[INFO] FFmpeg: 合成成功。")
 
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None):
     """主处理函数

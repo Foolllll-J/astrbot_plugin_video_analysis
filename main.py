@@ -21,6 +21,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     # 使用 run_in_executor 在单独的线程中运行同步的 delete_old_files 函数
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
+
 @register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站视频", "0.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
@@ -64,10 +65,10 @@ async def auto_parse_bili(self: videoAnalysis, event: AstrMessageEvent, *args, *
     message_obj_str = str(event.message_obj)
 
     # 1. 文件清理 (始终在最前面执行)
-    bili_download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
-    logger.info(f"开始清理B站旧文件，阈值：{self.delete_time}分钟")
-    # 异步调用清理函数，避免阻塞
-    await async_delete_old_files(bili_download_dir, self.delete_time)
+    # 假设 bili_get.py 返回的路径总是 'data/plugins/astrbot_plugin_video_analysis/download_videos/bili' 开头
+    bili_download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
+    logger.info(f"开始清理B站旧文件，阈值：{self.delete_time}分钟 (目录: {bili_download_dir_rel})")
+    await async_delete_old_files(bili_download_dir_rel, self.delete_time)
 
     if re.search(r"reply", message_obj_str):
         logger.debug("消息是回复类型，跳过解析。")
@@ -106,21 +107,33 @@ async def auto_parse_bili(self: videoAnalysis, event: AstrMessageEvent, *args, *
             yield event.plain_result("抱歉，这个B站链接我不能打开，请检查一下链接是否正确。")
             return
 
-        file_path = result.get("video_path")
+        file_path_rel = result.get("video_path")
         media_component = None
-        if file_path and os.path.exists(file_path):
-            logger.info(f"找到本地视频文件：{file_path}，开始处理文件发送。")
-            nap_file_path = await self._send_file_if_needed(file_path) if self.nap_server_address != "localhost" else file_path
-            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-            logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
-            if file_size_mb > self.max_video_size:
-                logger.warning("文件超出大小限制，将以文件形式发送。")
-                media_component = Comp.File(file=nap_file_path, name=os.path.basename(nap_file_path))
+        
+        if file_path_rel:
+            logger.info(f"解析结果中的视频文件路径 (相对): {file_path_rel}")
+            
+            if os.path.exists(file_path_rel):
+                logger.info("文件存在性检查通过。")
+                
+                # 发送文件时，使用绝对路径
+                nap_file_path = await self._send_file_if_needed(file_path_rel) 
+                
+                # 检查文件大小
+                file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
+                logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
+                
+                if file_size_mb > self.max_video_size:
+                    logger.warning("文件超出大小限制，将以文件形式发送。")
+                    media_component = Comp.File(file=nap_file_path, name=os.path.basename(nap_file_path))
+                else:
+                    logger.info("文件在大小限制内，将以视频形式发送。")
+                    media_component = Comp.Video.fromFileSystem(path = nap_file_path)
             else:
-                logger.info("文件在大小限制内，将以视频形式发送。")
-                media_component = Comp.Video.fromFileSystem(path = nap_file_path)
+                logger.warning(f"os.path.exists() 检查失败，文件不存在于路径: {file_path_rel}")
+                # 此警告日志即对应你之前遇到的问题，如果出现，请检查 bili_get.py 的路径是否也已修正
         else:
-            logger.warning("未下载到本地视频文件。")
+            logger.warning("process_bili_video 未返回视频文件路径。")
 
         logger.info("开始构建视频信息文本。")
         info_text = (
