@@ -31,7 +31,7 @@ apt-get update && apt-get install ffmpeg yt-dlp -y
 ```
 
 2. 下载本仓库。
-3. 将整个 `astrbot_plugin_file_checker` 文件夹放入 `astrbot` 的 `plugins` 目录中。
+3. 将整个 `astrbot_plugin_video_analysis` 文件夹放入 `astrbot` 的 `plugins` 目录中。
 4. 重启 AstrBot。
 
 ### 📝 版本记录
@@ -46,6 +46,6 @@ apt-get update && apt-get install ffmpeg yt-dlp -y
 本项目在开发过程中，参考并得益于以下项目，特此感谢：
 
 - **原始代码参考**：`https://github.com/miaoxutao123/astrbot_plugin_videos_analysis`
-- **高性能下载核心**：`https://github.com/yt-dlp/yt-dlp`
+- **视频下载核心**：`https://github.com/yt-dlp/yt-dlp`
 - **抖音解析服务**：`https://github.com/Evil0ctal/Douyin_TikTok_Download_API`
 
