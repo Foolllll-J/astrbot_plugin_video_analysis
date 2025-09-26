@@ -31,6 +31,17 @@ CONFIG = {
     "VIDEO": {"enable": True, "send_link": False, "send_video": True}
 }
 
+# --- 清晰度映射辅助函数 ---
+def map_quality_to_height(quality_code: int) -> int:
+    """将 B站质量代码映射为 yt-dlp 的最大高度限制（p）。"""
+    if quality_code >= 120: return 2160 # 4K
+    if quality_code >= 112: return 1080 # 1080P+
+    if quality_code >= 80: return 1080  # 1080P
+    if quality_code >= 64: return 720   # 720P
+    if quality_code >= 32: return 480   # 480P
+    if quality_code >= 16: return 360   # 360P
+    return 1080 # 默认最高质量
+
 # 正则表达式 and AV/BV conversion functions
 REG_B23 = re.compile(r'(b23\.tv|bili2233\.cn)\/[\w]+')
 REG_BV = re.compile(r'BV1\w{9}')
@@ -235,7 +246,7 @@ def check_ytdlp_installed():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-async def download_video_ytdlp(bvid, cookies_file, download_dir, num_threads=8):
+async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num_threads=8):
     """
     使用 yt-dlp 命令下载并合并视频。
     """
@@ -276,11 +287,17 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, num_threads=8):
     if os.path.exists(output_template):
         os.remove(output_template)
 
-    # 3. 构建 yt-dlp 命令 (包含加速和模拟参数)
+    # 3. 动态构建格式选择器
+    max_height = map_quality_to_height(quality)
+    log_callback(f"[DEBUG] 目标质量代码 {quality} 映射到最大高度 {max_height}p。")
+    format_selector = f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best"
+
+
+    # 4. 构建 yt-dlp 命令 (包含加速和模拟参数)
     cmd = [
         'yt-dlp',
         '--cookies', netscape_cookie_path, # <-- 使用 Netscape 格式的临时文件
-        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best', # 格式选择
+        '-f', format_selector, # 格式选择
         '--merge-output-format', 'mp4', 
         '-N', str(num_threads), # 并行下载线程
         '--output', output_template,
@@ -295,32 +312,47 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, num_threads=8):
     
     log_callback(f"[DEBUG] yt-dlp CMD: {' '.join(cmd)}")
     
-    # 4. 运行 yt-dlp (使用标准的 asyncio 捕获)
+    # 5. 运行 yt-dlp (使用标准的 asyncio 捕获)
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     
+    # 6. 立即输出“处理中”日志
     log_callback("[INFO] yt-dlp 进程已成功启动。请等待下载和合成...")
-    # --- 修复后的核心逻辑：直接等待进程完成，并捕获所有输出 ---
+
+    # 7. 捕获输出和等待
+    # 实时打印 yt-dlp 的输出
+    # 仅在 process.communicate() 阻塞时，外部程序才能进行 I/O
+    # 我们信任 yt-dlp 会自己处理进度，这里只在结束后读取
     stdout_data, stderr_data = await process.communicate()
     
-    # 5. 检查退出码和清理
+    # 8. 检查退出码和清理
     os.remove(netscape_cookie_path) # 始终清理临时文件
 
     if process.returncode != 0:
         error_output = stderr_data.decode(errors='ignore').strip()
-        log_callback(f"[ERROR] yt-dlp 下载失败 (Exit Code: {process.returncode})")
+        log_callback(f"[ERROR] yt-dlp 命令行执行完毕。退出码: {process.returncode}。")
         log_callback(f"[ERROR] yt-dlp 错误输出: {error_output[:1000]}...")
         raise Exception(f"yt-dlp 下载失败，请检查 FFmpeg 和 yt-dlp 日志。")
 
-    # 6. 检查最终文件是否存在
+    log_callback(f"[INFO] yt-dlp 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+
+    # 9. 检查最终文件是否存在
     if os.path.exists(output_template):
+        # --- 核心修复：强制更新文件时间戳为当前时间 ---
+        try:
+            os.utime(output_template, None) 
+            log_callback(f"[INFO] 文件时间戳已更新至当前时间，防止被自动清理。")
+        except Exception as utime_e:
+            log_callback(f"[WARN] 无法更新文件时间戳 (os.utime 失败): {utime_e}")
+        # --- 核心修复结束 ---
+        
         log_callback(f"[INFO] yt-dlp 下载并合成成功: {output_template}")
         return output_template
     else:
-        log_callback(f"[ERROR] yt-dlp 成功退出 (Exit Code 0) 但未生成文件：{output_template}")
+        log_callback(f"[ERROR] yt-dlp 运行成功但未生成文件：{output_template}")
         raise Exception("yt-dlp 运行成功但未能生成最终文件。")
 
 
@@ -356,7 +388,8 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
     if download_flag and use_login:
         log_callback("[INFO] 调用 yt-dlp 进行并行下载和合成 (需登录凭证)...")
         try:
-            filename = await download_video_ytdlp(bvid, cookies_file, download_dir)
+            # 传递 quality 参数
+            filename = await download_video_ytdlp(bvid, cookies_file, download_dir, quality=quality)
         except Exception as e:
             # yt-dlp 下载失败，可能是反爬虫，直接返回 None 让 main.py 重试
             log_callback(f"[WARN] yt-dlp 高清下载失败。错误: {e}")
