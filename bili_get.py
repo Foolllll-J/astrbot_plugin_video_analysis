@@ -4,16 +4,12 @@ import re
 import os
 import aiofiles
 import json
-import time
 import qrcode
-from PIL import Image
 import base64
 from io import BytesIO
 from urllib.parse import unquote
 from astrbot.api import logger
-import requests
 import subprocess 
-import shutil 
 
 COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
