@@ -24,9 +24,7 @@ def delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
             file_path = os.path.join(folder_path, filename)
             if os.path.isfile(file_path):
                 try:
-                    # 获取文件的最后修改时间
                     file_time = os.path.getmtime(file_path)
-                    # 如果文件时间距当前时间大于阈值，删除文件
                     if current_time - file_time > time_threshold_seconds:
                         os.remove(file_path)
                         logger.info(f"已删除过期文件: {file_path}")

@@ -3,13 +3,11 @@ from typing import Union, List, Dict, Any
 
 import httpx
 import aiofiles
-import asyncio
 import os
-import re
 import json
+import hashlib
 from astrbot.api import logger
 
-# --- 辅助类：模拟外部库的结构 ---
 class ParseError(Exception):
     """自定义解析错误"""
     pass
@@ -84,35 +82,25 @@ class DYResult:
 
         raise Exception("无法解析内容类型或视频数据缺失")
 
-# --- 核心下载逻辑 ---
-
-# 外部 API 地址
-DOUYIN_API_URL = "https://douyin.foolsclub.site" 
-
-# ⚠️ WARNING: 请确保 DOUYIN_COOKIE_STRING 包含您从 F12 复制的全部 Cookie 字符串！
-DOUYIN_COOKIE_STRING = "" 
-
-
-def _get_douyin_cookie_header() -> str:
-    """将硬编码的 Cookie 字符串转换为 HTTP 请求头格式。"""
-    return DOUYIN_COOKIE_STRING
-
-
-async def process_douyin_video(url: str, download_dir: str):
+async def process_douyin_video(url: str, download_dir: str, api_url: str):
     """
     使用外部 API 获取抖音视频直链，并下载到本地。
+    
+    Args:
+        url (str): 抖音分享链接。
+        download_dir (str): 文件下载目录。
+        api_url (str): 外部解析服务的地址。
     """
     logger.info(f"[INFO] Douyin: 开始通过外部API解析链接: {url}")
     
     # 1. API 解析
-    api_endpoint = f"{DOUYIN_API_URL}/api/hybrid/video_data"
+    api_endpoint = f"{api_url}/api/hybrid/video_data"
     
     try:
-        # 修复：将 verify=False 提升到 Client 初始化阶段
+        # 禁用 SSL 验证 (verify=False)
         async with httpx.AsyncClient(timeout=30, verify=False) as client:
             params = {"url": url, "minimal": False}
             
-            # 构建请求头（不含 Cookie，因为外部 API 已经部署了）
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
                 'Referer': 'https://www.douyin.com/'
@@ -131,7 +119,6 @@ async def process_douyin_video(url: str, download_dir: str):
             
             logger.info(f"[DEBUG] Douyin API 原始 JSON: {json.dumps(api_data, ensure_ascii=False)[:300]}...")
 
-            # 检查API返回码 (业务码)
             if api_data.get("code") != 200 and api_data.get("status_code") != 0:
                 logger.error(f"[ERROR] Douyin API 业务错误: {api_data.get('msg', '未知业务错误')}")
                 logger.error(f"[DEBUG] Douyin API 失败 JSON: {json.dumps(api_data, ensure_ascii=False)}") 
@@ -144,8 +131,6 @@ async def process_douyin_video(url: str, download_dir: str):
                 return {"title": result.desc, "author": result.author, "url": url, "video_path": None}
 
             video_url = result.video.url
-            match = re.search(r'video/(\d+)', video_url)
-            simple_id = match.group(1) if match else re.search(r'/([a-zA-Z0-9]+)/', url).group(1) if re.search(r'/([a-zA-Z0-9]+)/', url) else "unknown_douyin"
             
     except httpx.ReadTimeout:
         logger.error("[ERROR] Douyin API 请求超时 (30秒)。")
@@ -154,24 +139,24 @@ async def process_douyin_video(url: str, download_dir: str):
         logger.error(f"[ERROR] Douyin 解析或网络错误: {e}", exc_info=True)
         return None
 
-    # 3. 检查缓存（使用简化 ID）
+    # 3. 文件命名和缓存检查 (使用 URL 的 MD5 哈希作为唯一 ID)
+    url_bytes = url.encode('utf-8')
+    simple_id = hashlib.md5(url_bytes).hexdigest()
+
     os.makedirs(download_dir, exist_ok=True)
     final_file = os.path.join(download_dir, f"{simple_id}.mp4")
     
     if os.path.exists(final_file):
-        logger.info(f"[INFO] Douyin 文件已存在，跳过下载: {final_file}")
+        logger.info(f"[INFO] Douyin 文件已存在，跳过下载 (Hash ID: {simple_id})。")
         return {"title": result.desc, "author": result.author, "url": url, "video_path": final_file}
 
-    # 4. 直链下载
     logger.info(f"[INFO] Douyin: 开始下载直链文件到: {final_file}")
     try:
-        # 修复：使用新的 Client 实例进行直链下载，并继承 verify=False
         async with httpx.AsyncClient(timeout=300, verify=False) as client: 
             download_headers = {'User-Agent': 'Mozilla/5.0'}
             async with client.stream('GET', video_url, headers=download_headers) as response: 
                 response.raise_for_status()
                 
-                # 流式写入
                 async with aiofiles.open(final_file, "wb") as f:
                     async for chunk in response.aiter_bytes():
                         await f.write(chunk)

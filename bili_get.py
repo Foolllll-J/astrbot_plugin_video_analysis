@@ -15,7 +15,6 @@ import requests
 import subprocess 
 import shutil 
 
-# --- 常量和设置 ---
 COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
@@ -23,7 +22,6 @@ log_callback = logger.info
 COOKIE_VALID = None
 
 def set_log_callback(callback):
-    """设置日志回调函数"""
     global log_callback
     log_callback = callback
 
@@ -31,7 +29,6 @@ CONFIG = {
     "VIDEO": {"enable": True, "send_link": False, "send_video": True}
 }
 
-# --- 清晰度映射辅助函数 ---
 def map_quality_to_height(quality_code: int) -> int:
     """将 B站质量代码映射为 yt-dlp 的最大高度限制（p）。"""
     if quality_code >= 120: return 2160 # 4K
@@ -236,8 +233,6 @@ async def check_login_status_loop(qrcode_key):
             elif data.get("code") == -4 or data.get("code") == -5: log_callback("请在手机上确认登录")
     log_callback("\n登录超时，请重试"); return None
 
-# --- 【核心下载函数：YT-DLP 逻辑】 ---
-
 def check_ytdlp_installed():
     """检查 yt-dlp 是否安装在 PATH 中"""
     try:
@@ -256,7 +251,6 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num
 
     os.makedirs(download_dir, exist_ok=True)
     
-    # yt-dlp 下载链接，输出文件名为 BV号.mp4
     output_template = os.path.join(download_dir, f"{bvid}.mp4")
     
     # 1. 转换 Cookie 为 Netscape 格式并写入临时文件
@@ -303,10 +297,9 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num
         '--output', output_template,
         '--force-overwrites', # 覆盖已有文件
         
-        # --- 优化参数：增强健壮性与输出 ---
         '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
         '--min-sleep-interval', '5', # 失败时随机等待 5-15 秒
-        '--max-sleep-interval', '15', # 随机等待的最大值 (5 到 15 秒)
+        '--max-sleep-interval', '15',
         f'https://www.bilibili.com/video/{bvid}'
     ]
     
@@ -324,8 +317,6 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num
 
     # 7. 捕获输出和等待
     # 实时打印 yt-dlp 的输出
-    # 仅在 process.communicate() 阻塞时，外部程序才能进行 I/O
-    # 我们信任 yt-dlp 会自己处理进度，这里只在结束后读取
     stdout_data, stderr_data = await process.communicate()
     
     # 8. 检查退出码和清理
@@ -341,13 +332,11 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num
 
     # 9. 检查最终文件是否存在
     if os.path.exists(output_template):
-        # --- 核心修复：强制更新文件时间戳为当前时间 ---
         try:
             os.utime(output_template, None) 
             log_callback(f"[INFO] 文件时间戳已更新至当前时间，防止被自动清理。")
         except Exception as utime_e:
             log_callback(f"[WARN] 无法更新文件时间戳 (os.utime 失败): {utime_e}")
-        # --- 核心修复结束 ---
         
         log_callback(f"[INFO] yt-dlp 下载并合成成功: {output_template}")
         return output_template
@@ -355,14 +344,10 @@ async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num
         log_callback(f"[ERROR] yt-dlp 运行成功但未生成文件：{output_template}")
         raise Exception("yt-dlp 运行成功但未能生成最终文件。")
 
-
-# --- 核心入口函数 process_bili_video 替换下载逻辑 ---
-# 它现在是唯一处理下载的函数
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None):
     """主处理函数 (现在调用 yt-dlp) """
     log_callback(f"[INFO] process_bili_video: 开始处理B站链接: {url}")
     
-    # 确保链接解析逻辑存在并成功获取 video_info, bvid
     video_info = None
     try:
         if REG_B23.search(url): video_info = await parse_b23(REG_B23.search(url).group())

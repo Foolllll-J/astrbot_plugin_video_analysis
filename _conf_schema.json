@@ -15,7 +15,7 @@
         "default": 60
     },
     "max_video_size":{
-        "description": "最大视频大小（单位MB）（预留，还未完全实现）",
+        "description": "最大视频大小（单位MB）",
         "type": "int",
         "default": 200
     },
@@ -48,5 +48,11 @@
           "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式",
           "type": "bool",
           "default": false
+    },
+    "douyin_api_url": {
+        "description": "抖音/TikTok 外部解析 API 地址",
+        "hint": "未填写则禁用抖音解析。",
+        "type": "string",
+        "default": null
     }
 }

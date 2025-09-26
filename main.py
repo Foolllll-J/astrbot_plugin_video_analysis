@@ -6,24 +6,18 @@ import astrbot.api.message_components as Comp
 
 import re
 import os
-import json
 import asyncio
-import time
 
 from .file_send_server import send_file
 from .bili_get import process_bili_video
 from .douyin_get import process_douyin_video 
-# 导入 auto_delete 模块
 from .auto_delete import delete_old_files
 
-# --- 定义重试次数 ---
-MAX_PROCESS_RETRIES = 2 # 核心逻辑 (下载/解析) 总共尝试 3 次
-MAX_SEND_RETRIES = 2    # 消息发送 (回复) 总共尝试 3 次
+MAX_PROCESS_RETRIES = 2
+MAX_SEND_RETRIES = 2
 
-# 将 auto_delete.py 中的函数封装为异步，通过线程池执行
 async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
     loop = asyncio.get_event_loop()
-    # 使用 run_in_executor 在单独的线程中运行同步的 delete_old_files 函数
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
@@ -36,10 +30,11 @@ class videoAnalysis(Star):
         self.delete_time = config.get("delete_time", 60)
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = config.get("bili_quality", 32)
-        self.bili_reply_mode = config.get("bili_reply_mode", 2)
+        self.bili_reply_mode = config.get("bili_reply_mode", 4)
         self.bili_url_mode = config.get("bili_url_mode", True)
         self.Merge_and_forward = config.get("Merge_and_forward", False)
         self.bili_use_login = config.get("bili_use_login", False)
+        self.douyin_api_url = config.get("douyin_api_url", None)
         
         logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 回复模式={self.bili_reply_mode}, 使用登录={self.bili_use_login}")
 
@@ -106,12 +101,10 @@ class videoAnalysis(Star):
             
         else: return
 
-        # --- 内层重试循环：消息发送 ---
         for send_attempt in range(MAX_SEND_RETRIES + 1):
             try:
                 content_to_send = []
                 
-                # --- 组装逻辑：通过 yield 语句将消息分步发送 ---
                 if reply_mode == 0: content_to_send = [Comp.Plain(info_text)]
                 elif reply_mode == 1: 
                     if platform == 'bili':
@@ -139,13 +132,12 @@ class videoAnalysis(Star):
                 elif reply_mode == 4: # 纯视频
                     if media_component: content_to_send = [media_component]
 
-                # 执行发送
                 if content_to_send:
                     yield event.chain_result(content_to_send)
                     logger.info("消息发送成功。")
                 
                 logger.info(f"最终消息发送成功 (总尝试次数: {send_attempt + 1})。")
-                break # <--- FIXED: Change return to break to proceed to cleanup
+                break
                 
             except Exception as e:
                 if send_attempt < MAX_SEND_RETRIES:
@@ -154,9 +146,9 @@ class videoAnalysis(Star):
                 else:
                     logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
                     yield event.plain_result("警告：视频下载成功，但平台消息发送失败，请稍后查看。")
-                    return # Keep return here for final failure
+                    return
 
-        # 4. 文件清理 (在所有回复发送完成后执行) <--- This section will now be reached upon success --->
+        # 4. 文件清理 (在所有回复发送完成后执行)
         download_dir_rel = f"data/plugins/astrbot_plugin_video_analysis/download_videos/{platform}"
         logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_rel})")
         await async_delete_old_files(download_dir_rel, self.delete_time)
@@ -188,14 +180,12 @@ class videoAnalysis(Star):
             if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败."); break
             await asyncio.sleep(2)
 
-        # 检查核心处理是否成功，失败则发送通用错误
         if not result or not result.get("video_path") or not os.path.exists(result["video_path"]):
             yield event.plain_result("抱歉，由于网络或解析问题，无法完成视频处理。请稍后重试。")
             download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
             await async_delete_old_files(download_dir_rel, self.delete_time)
             return
 
-        # 调用统一发送函数
         async for response in self._process_and_send(event, result, 'bili'):
             yield response
 
@@ -206,12 +196,12 @@ class videoAnalysis(Star):
         download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/douyin"
         result = None
 
-        # --- 核心重试逻辑 ---
         for attempt in range(MAX_PROCESS_RETRIES + 1):
             try:
                 logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
-                # 调用抖音处理函数
-                result = await process_douyin_video(url, download_dir=download_dir) 
+                
+                # FIX: 将 API 地址传递给 douyin_get.py
+                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url) 
                 
                 if not result:
                     if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
@@ -230,14 +220,12 @@ class videoAnalysis(Star):
             if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败."); break
             await asyncio.sleep(2)
         
-        # 检查核心处理是否成功，失败则发送通用错误
         if not result or not os.path.exists(result["video_path"]):
             yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。请稍后重试。")
             download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/douyin"
             await async_delete_old_files(download_dir_rel, self.delete_time)
             return
 
-        # 调用统一发送函数
         async for response in self._process_and_send(event, result, 'douyin'):
             yield response
 
@@ -273,6 +261,11 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
 
     if match_douyin:
+        # 检查是否配置了 API 地址
+        if not self.douyin_api_url:
+            logger.warning("成功匹配到抖音链接，但 douyin_api_url 未配置，跳过解析。")
+            return
+            
         url = match_douyin.group(1)
         logger.info(f"成功匹配到抖音短链接：{url}")
         
