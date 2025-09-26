@@ -12,7 +12,7 @@ import time
 
 from .file_send_server import send_file
 from .bili_get import process_bili_video
-from .douyin_get import process_douyin_video # 【新增导入】
+from .douyin_get import process_douyin_video 
 # 导入 auto_delete 模块
 from .auto_delete import delete_old_files
 
@@ -145,7 +145,7 @@ class videoAnalysis(Star):
                     logger.info("消息发送成功。")
                 
                 logger.info(f"最终消息发送成功 (总尝试次数: {send_attempt + 1})。")
-                return # 成功退出
+                break # <--- FIXED: Change return to break to proceed to cleanup
                 
             except Exception as e:
                 if send_attempt < MAX_SEND_RETRIES:
@@ -154,9 +154,9 @@ class videoAnalysis(Star):
                 else:
                     logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
                     yield event.plain_result("警告：视频下载成功，但平台消息发送失败，请稍后查看。")
-                    return
+                    return # Keep return here for final failure
 
-        # 4. 文件清理 (在所有回复发送完成后执行)
+        # 4. 文件清理 (在所有回复发送完成后执行) <--- This section will now be reached upon success --->
         download_dir_rel = f"data/plugins/astrbot_plugin_video_analysis/download_videos/{platform}"
         logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_rel})")
         await async_delete_old_files(download_dir_rel, self.delete_time)
@@ -211,7 +211,6 @@ class videoAnalysis(Star):
             try:
                 logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
                 # 调用抖音处理函数
-                # 【FIXED: 调用正确的 douyin_get 模块】
                 result = await process_douyin_video(url, download_dir=download_dir) 
                 
                 if not result:
@@ -271,7 +270,7 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         
     # --- 2. 检查 抖音/TikTok 链接 ---
     # 匹配 v.douyin.com 短链接和文本中的短链接
-    match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\/]+)", message_str)
+    match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
 
     if match_douyin:
         url = match_douyin.group(1)
