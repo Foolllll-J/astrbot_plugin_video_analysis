@@ -13,7 +13,7 @@ from .bili_get import process_bili_video
 from .douyin_get import process_douyin_video 
 from .auto_delete import delete_old_files
 
-MAX_PROCESS_RETRIES = 2
+MAX_PROCESS_RETRIES = 0
 MAX_SEND_RETRIES = 2
 
 async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
@@ -275,3 +275,4 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         return
         
     logger.debug("未匹配到任何支持的视频链接，跳过。")
+    
