@@ -14,6 +14,8 @@ import subprocess
 COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
 os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
 
+YUTTO_PATH = "/root/.local/bin/yutto"
+
 log_callback = logger.info
 COOKIE_VALID = None
 
@@ -26,14 +28,14 @@ CONFIG = {
 }
 
 def map_quality_to_height(quality_code: int) -> int:
-    """将 B站质量代码映射为 yt-dlp 的最大高度限制（p）。"""
-    if quality_code >= 120: return 2160 # 4K
-    if quality_code >= 112: return 1080 # 1080P+
-    if quality_code >= 80: return 1080  # 1080P
-    if quality_code >= 64: return 720   # 720P
-    if quality_code >= 32: return 480   # 480P
-    if quality_code >= 16: return 360   # 360P
-    return 1080 # 默认最高质量
+    """将 B站质量代码映射为 yutto 的质量代码（qn）。"""
+    if quality_code >= 120: return 120 # 4K
+    if quality_code >= 112: return 112 # 1080P+
+    if quality_code >= 80: return 80  # 1080P
+    if quality_code >= 64: return 64   # 720P
+    if quality_code >= 32: return 32   # 480P
+    if quality_code >= 16: return 16   # 360P
+    return 80 # 默认 1080P
 
 # 正则表达式 and AV/BV conversion functions
 REG_B23 = re.compile(r'(b23\.tv|bili2233\.cn)\/[\w]+')
@@ -229,119 +231,106 @@ async def check_login_status_loop(qrcode_key):
             elif data.get("code") == -4 or data.get("code") == -5: log_callback("请在手机上确认登录")
     log_callback("\n登录超时，请重试"); return None
 
-def check_ytdlp_installed():
-    """检查 yt-dlp 是否安装在 PATH 中"""
+def check_yutto_installed():
+    """检查 yutto 是否安装在 PATH 中，或检查绝对路径"""
+    if os.path.exists(YUTTO_PATH):
+        return True
+    
     try:
-        subprocess.run(['yt-dlp', '--version'], check=True, capture_output=True)
+        subprocess.run(['yutto', '--version'], check=True, capture_output=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-async def download_video_ytdlp(bvid, cookies_file, download_dir, quality=80, num_threads=8):
+async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num_workers=8):
     """
-    使用 yt-dlp 命令下载并合并视频。
+    使用 yutto 命令下载视频。
     """
-    if not check_ytdlp_installed():
-        log_callback("[FATAL] yt-dlp 未安装或不在系统 PATH 中。无法进行下载。")
-        raise Exception("yt-dlp is not installed or not found in PATH.")
+    yutto_cmd = YUTTO_PATH if os.path.exists(YUTTO_PATH) else 'yutto'
+    if not check_yutto_installed():
+        log_callback("[FATAL] yutto 未安装或不在系统 PATH 中。无法进行下载。")
+        raise Exception("yutto is not installed or not found in PATH.")
 
     os.makedirs(download_dir, exist_ok=True)
     
-    output_template = os.path.join(download_dir, f"{bvid}.mp4")
+    output_filename = f"{bvid}.mp4"
+    output_path = os.path.join(download_dir, output_filename)
     
-    # 1. 转换 Cookie 为 Netscape 格式并写入临时文件
+    # 1. 读取 Cookie 并提取 SESSDATA
     try:
         async with aiofiles.open(cookies_file, "r", encoding="utf-8") as f:
             json_cookies = json.loads(await f.read())
+            sessdata = json_cookies.get("SESSDATA")
+            if not sessdata:
+                raise ValueError("Cookie 文件中缺少 SESSDATA 字段。")
     except Exception as e:
         log_callback(f"[ERROR] 无法读取或解析 JSON Cookie 文件: {cookies_file}. 错误: {e}")
-        raise Exception("无法读取 Cookie 文件，请检查格式。")
+        raise Exception("无法获取 SESSDATA Cookie，请检查格式或登录状态。")
 
-    netscape_cookie_path = os.path.join(download_dir, "bili_netscape_temp.txt")
-    netscape_header = "# Netscape HTTP Cookie File\n"
-    netscape_format = "{domain}\t{flag}\t{path}\t{secure}\t{expiration}\t{name}\t{value}\n"
-    netscape_entries = netscape_header
-    cookies_to_convert = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5']
-
-    for name in cookies_to_convert:
-        if name in json_cookies:
-            netscape_entries += netscape_format.format(
-                domain='.bilibili.com', flag='TRUE', path='/', secure='TRUE', expiration='0',
-                name=name, value=json_cookies[name]
-            )
-        
-    async with aiofiles.open(netscape_cookie_path, "w", encoding="utf-8") as f:
-        await f.write(netscape_entries)
-    
     # 2. 清理旧的缓存文件
-    if os.path.exists(output_template):
-        os.remove(output_template)
+    if os.path.exists(output_path):
+        os.remove(output_path)
 
-    # 3. 动态构建格式选择器
-    max_height = map_quality_to_height(quality)
-    log_callback(f"[DEBUG] 目标质量代码 {quality} 映射到最大高度 {max_height}p。")
-    format_selector = f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best"
+    # 3. 动态构建质量参数
+    quality_qn = map_quality_to_height(quality)
+    log_callback(f"[DEBUG] 目标质量代码 {quality} 映射到 yutto qn: {quality_qn}。")
 
-
-    # 4. 构建 yt-dlp 命令 (包含加速和模拟参数)
+    # 4. 构建 yutto 命令
     cmd = [
-        'yt-dlp',
-        '--cookies', netscape_cookie_path, # <-- 使用 Netscape 格式的临时文件
-        '-f', format_selector, # 格式选择
-        '--merge-output-format', 'mp4', 
-        '-N', str(num_threads), # 并行下载线程
-        '--output', output_template,
-        '--force-overwrites', # 覆盖已有文件
-        
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        '--min-sleep-interval', '5', # 失败时随机等待 5-15 秒
-        '--max-sleep-interval', '15',
-        f'https://www.bilibili.com/video/{bvid}'
+        yutto_cmd,
+        'https://www.bilibili.com/video/' + bvid,
+        '-c', sessdata,                       # 直接传递 SESSDATA
+        '-d', download_dir,                   # 存放根目录
+        '-q', str(quality_qn),                # 视频质量等级 (qn)
+        '-n', str(num_workers),               # 最大并行 Worker 数量
+        '-w',                                 # 强制覆盖
+        '--no-color',                         # 禁用颜色
+        '--no-progress',                      # 禁用进度条 (便于日志输出)
+        '--subpath-template', bvid,           # 文件名为 BVID (避免目录嵌套，仅文件名)
+        '--no-danmaku',                       # 通常下载视频不需要弹幕
+        '--no-subtitle',                      # 通常下载视频不需要字幕
     ]
     
-    log_callback(f"[DEBUG] yt-dlp CMD: {' '.join(cmd)}")
+    log_callback(f"[DEBUG] yutto CMD: {' '.join(cmd)}")
     
-    # 5. 运行 yt-dlp (使用标准的 asyncio 捕获)
+    # 5. 运行 yutto (使用标准的 asyncio 捕获)
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     
-    # 6. 立即输出“处理中”日志
-    log_callback("[INFO] yt-dlp 进程已成功启动。请等待下载和合成...")
+    log_callback("[INFO] yutto 进程已成功启动。请等待下载和合并...")
 
-    # 7. 捕获输出和等待
-    # 实时打印 yt-dlp 的输出
+    # 6. 捕获输出和等待
     stdout_data, stderr_data = await process.communicate()
     
-    # 8. 检查退出码和清理
-    os.remove(netscape_cookie_path) # 始终清理临时文件
-
+    # 7. 检查退出码
     if process.returncode != 0:
         error_output = stderr_data.decode(errors='ignore').strip()
-        log_callback(f"[ERROR] yt-dlp 命令行执行完毕。退出码: {process.returncode}。")
-        log_callback(f"[ERROR] yt-dlp 错误输出: {error_output[:1000]}...")
-        raise Exception(f"yt-dlp 下载失败，请检查 FFmpeg 和 yt-dlp 日志。")
+        log_callback(f"[ERROR] yutto 命令行执行完毕。退出码: {process.returncode}。")
+        log_callback(f"[ERROR] yutto 错误输出: {error_output[:1000]}...")
+        raise Exception(f"yutto 下载失败，请检查 yutto 日志。")
 
-    log_callback(f"[INFO] yt-dlp 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+    log_callback(f"[INFO] yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
 
-    # 9. 检查最终文件是否存在
-    if os.path.exists(output_template):
+    # 8. 检查最终文件是否存在
+    if os.path.exists(output_path):
         try:
-            os.utime(output_template, None) 
+            os.utime(output_path, None) 
             log_callback(f"[INFO] 文件时间戳已更新至当前时间，防止被自动清理。")
         except Exception as utime_e:
             log_callback(f"[WARN] 无法更新文件时间戳 (os.utime 失败): {utime_e}")
         
-        log_callback(f"[INFO] yt-dlp 下载并合成成功: {output_template}")
-        return output_template
+        log_callback(f"[INFO] yutto 下载成功: {output_path}")
+        return output_path
     else:
-        log_callback(f"[ERROR] yt-dlp 运行成功但未生成文件：{output_template}")
-        raise Exception("yt-dlp 运行成功但未能生成最终文件。")
+        log_callback(f"[ERROR] yutto 运行成功但未生成文件：{output_path}。")
+        log_callback(f"[INFO] yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
+        raise Exception("yutto 运行成功但未能生成最终文件，可能是文件名或路径设置问题。")
 
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None):
-    """主处理函数 (现在调用 yt-dlp) """
+    """主处理函数 (现在调用 yutto) """
     log_callback(f"[INFO] process_bili_video: 开始处理B站链接: {url}")
     
     video_info = None
@@ -358,32 +347,31 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
     download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
     cookies_file = COOKIE_FILE
     
-    # 1. 检查本地缓存 (yt-dlp生成的格式为 BVID.mp4)
+    # 1. 检查本地缓存 (yutto生成的格式为 BVID.mp4)
     cached_file = os.path.join(download_dir, f"{bvid}.mp4")
     if os.path.exists(cached_file):
         log_callback(f"本地已存在视频文件：{cached_file}，跳过下载")
         return {"video_path": cached_file, "title": video_info["title"], "cover": video_info["cover"], "duration": video_info["duration"], "stats": stats, "bvid": bvid, "view_count": stats["view"], "like_count": stats["like"], "danmaku_count": stats["danmaku"], "coin_count": stats["coin"], "favorite_count": stats["favorite"]}
 
-    # 2. 调用 yt-dlp 下载 (如果需要下载)
+    # 2. 调用 yutto 下载 (如果需要下载)
     filename = None
     if download_flag and use_login:
-        log_callback("[INFO] 调用 yt-dlp 进行并行下载和合成 (需登录凭证)...")
+        log_callback("[INFO] 调用 yutto 进行下载 (需登录凭证)...")
         try:
-            # 传递 quality 参数
-            filename = await download_video_ytdlp(bvid, cookies_file, download_dir, quality=quality)
+            filename = await download_video_yutto(bvid, cookies_file, download_dir, quality=quality, num_workers=8)
         except Exception as e:
-            # yt-dlp 下载失败，可能是反爬虫，直接返回 None 让 main.py 重试
-            log_callback(f"[WARN] yt-dlp 高清下载失败。错误: {e}")
+            log_callback(f"[WARN] yutto 高清下载失败。错误: {e}")
             return None 
 
-    # 3. 如果 yt-dlp 失败，或者 use_login=False，返回 None
+    # 3. 如果 yutto 失败，或者 use_login=False，返回 None
     if not filename and download_flag:
         log_callback("[WARN] 未开启登录或下载失败，无法获取视频文件。")
         return None
         
     return {
-        "direct_url": None, "title": video_info["title"], "cover": video_info["cover"],
+        "title": video_info["title"], "cover": video_info["cover"],
         "duration": video_info["duration"], "stats": video_info["stats"], "video_path": filename,
         "view_count": stats["view"], "like_count": stats["like"], "danmaku_count": stats["danmaku"],
         "coin_count": stats["coin"], "favorite_count": stats["favorite"], "bvid": video_info["bvid"],
     }
+    

@@ -17,31 +17,13 @@
     "max_video_size":{
         "description": "最大视频大小（单位MB）",
         "type": "int",
-        "default": 200
+        "default": 100
     },
     "bili_quality":{
         "description": "B站视频清晰度",
         "type": "int",
         "default":32,
         "hint" :"16: 360P|32: 480P|64: 720P|80: 1080P|112: 1080P+（高码率）|120: 4K"
-    },
-    "bili_reply_mode":{
-        "description": "回复模式",
-        "type": "int",
-        "default": 4,
-        "hint" :"0: 纯文本回复|1: 图片|2: 视频|3: 图片+视频|4: 纯视频回复"
-    },
-    "bili_url_mode":{
-        "description": "是否生成直链",
-        "type": "bool",
-        "default": true,
-        "hint" :"是否在哔哩哔哩视频解析时生成直链，默认生成直链"
-    },
-    "Merge_and_forward":{
-        "description": "是否合并转发",
-        "type": "bool",
-        "default": false,
-        "hint" :"是否在转发视频时合并视频和图片，默认不合并"
     },
     "bili_use_login": {
           "description": "是否使用登录状态下载B站视频",

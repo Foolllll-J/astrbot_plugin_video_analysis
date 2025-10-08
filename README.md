@@ -4,15 +4,14 @@
 ![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-orange)
 
-一个为 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yt-dlp** 等工具，稳定、快速地解析视频链接并发送视频给用户。
+一个为 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
 
 ---
-
 
 ### ✨ 功能
 
 - **多平台支持**：支持 Bilibili (B站) 和 Douyin (抖音) 短链接的自动解析。
-- **高性能下载**：调用 **`yt-dlp`** 命令行工具，实现高并发分段下载和自动 FFmpeg 合并。
+- **高性能下载**：调用 **`yutto`** 命令行工具，实现高并发下载和自动 FFmpeg 合并。
 - **双重重试机制**：自动重试下载/解析失败和消息发送失败，提高稳定性。
 - **资源管理**：异步清理超过设定阈值的临时文件，防止占用磁盘空间。
 
@@ -26,8 +25,17 @@
 # 1. 进入容器终端
 docker exec -it [你的容器ID或名称] /bin/bash
 
-# 2. 安装 FFmpeg & yt-dlp
-apt-get update && apt-get install ffmpeg yt-dlp -y
+# 2. 安装 FFmpeg
+apt-get update && apt-get install ffmpeg-y
+
+# 3. 安装 ppix
+pip install pipx
+
+# 4. 添加路径
+pipx ensurepath
+
+# 5. 安装 yutto
+pipx install yutto
 ```
 
 2. 下载本仓库。
@@ -45,7 +53,7 @@ apt-get update && apt-get install ffmpeg yt-dlp -y
 
 本项目在开发过程中，参考并得益于以下项目，特此感谢：
 
-- **原始代码参考**：`https://github.com/miaoxutao123/astrbot_plugin_videos_analysis`
-- **视频下载核心**：`https://github.com/yt-dlp/yt-dlp`
-- **抖音解析服务**：`https://github.com/Evil0ctal/Douyin_TikTok_Download_API`
+- **原始代码参考**：[AstrBot 视频解析插件](https://github.com/miaoxutao123/astrbot_plugin_videos_analysis)
+- **B站解析核心**：[yutto](https://github.com/yutto-dev/yutto)
+- **抖音解析服务**：[抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
 

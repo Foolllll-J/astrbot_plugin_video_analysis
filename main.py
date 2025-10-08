@@ -30,13 +30,10 @@ class videoAnalysis(Star):
         self.delete_time = config.get("delete_time", 60)
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = config.get("bili_quality", 32)
-        self.bili_reply_mode = config.get("bili_reply_mode", 4)
-        self.bili_url_mode = config.get("bili_url_mode", True)
-        self.Merge_and_forward = config.get("Merge_and_forward", False)
         self.bili_use_login = config.get("bili_use_login", False)
         self.douyin_api_url = config.get("douyin_api_url", None)
         
-        logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 回复模式={self.bili_reply_mode}, 使用登录={self.bili_use_login}")
+        logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}")
 
     async def _send_file_if_needed(self, file_path: str) -> str:
         """Helper function to send file through NAP server if needed"""
@@ -57,98 +54,59 @@ class videoAnalysis(Star):
     async def _process_and_send(self, event: AstrMessageEvent, result: dict, platform: str):
         """
         统一的消息发送逻辑，处理组件构建、重试、清理。
+        目标：如果视频过大，回复文本；否则，只发送视频组件。
         """
         
         file_path_rel = result.get("video_path")
         media_component = None
-        
-        # 1. 构建 media_component
-        if file_path_rel and os.path.exists(file_path_rel):
-            nap_file_path = await self._send_file_if_needed(file_path_rel) 
+        message_to_send = None
+
+        # 0. 检查文件是否存在
+        if not (file_path_rel and os.path.exists(file_path_rel)):
+            logger.error(f"process_bili_video/douyin_video 返回成功，但文件路径无效或文件不存在: {file_path_rel}")
+            # 即使失败，也要继续到文件清理步骤
+            pass
+        else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
 
+            # 1. 判断是否超出大小限制
             if file_size_mb > self.max_video_size:
-                media_component = Comp.File(file=nap_file_path, name=os.path.basename(nap_file_path))
+                # 视频过大，不发送视频，只回复文本消息
+                message_to_send = [Plain(f"抱歉，该视频文件大小为 {file_size_mb:.2f}MB，超过了 {self.max_video_size}MB 的最大限制，无法发送视频消息。")]
+                logger.warning(f"视频大小超出限制，将回复文本消息。")
             else:
+                # 视频在限制内，构建视频组件
+                nap_file_path = await self._send_file_if_needed(file_path_rel) 
+                
                 media_component = Comp.Video.fromFileSystem(path = nap_file_path)
+                message_to_send = [media_component]
+                logger.info(f"视频在大小限制内，构建 Video 组件。")
+
         
-        # 2. 构建 info_text (参数根据平台动态获取)
-        if platform == 'bili':
-            reply_mode = self.bili_reply_mode
-            url_mode = self.bili_url_mode
-            zhuanfa = self.Merge_and_forward
-            info_text = (
-                f"📜 视频标题：{result.get('title', '未知标题')}\n"
-                f"👀 观看次数：{result.get('view_count', 0)}\n"
-                f"👍 点赞次数：{result.get('like_count', 0)}\n"
-                f"💰 投币次数：{result.get('coin_count', 0)}\n"
-                f"📂 收藏次数：{result.get('favorite_count', 0)}\n"
-                f"💬 弹幕量：{result.get('danmaku_count', 0)}\n"
-                f"⏳ 视频时长：{int(result.get('duration', 0) / 60)}分{result.get('duration', 0) % 60}秒\n"
-            )
-            if url_mode: info_text += f"🎥 视频直链：{result.get('direct_url', '无')}\n"
-            info_text += f"🧷 原始链接：https://www.bilibili.com/video/{result.get('bvid', 'unknown')}"
-        
-        elif platform == 'douyin':
-            # 抖音：强制使用纯视频模式 (reply_mode=4)
-            reply_mode = 4 
-            url_mode = False 
-            zhuanfa = False
-            info_text = f"📹 抖音视频：{result.get('title', '未知标题')}\n"
-            info_text += f"作者：{result.get('author', 'N/A')}\n"
-            info_text += f"🔗 原始链接：{result.get('url', 'N/A')}"
-            
-        else: return
+        # 2. 发送逻辑
+        if message_to_send:
+            for send_attempt in range(MAX_SEND_RETRIES + 1):
+                try:
+                    yield event.chain_result(message_to_send)
+                    logger.info(f"消息发送成功 (总尝试次数: {send_attempt + 1})。")
+                    break
+                    
+                except Exception as e:
+                    if send_attempt < MAX_SEND_RETRIES:
+                        logger.warning(f"消息发送失败 (第 {send_attempt + 1} 次)，等待 2 秒后重试... 错误: {e}")
+                        await asyncio.sleep(2)
+                    else:
+                        logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
+                        # 如果是发送文本失败，回复警告文本
+                        yield event.plain_result("警告：消息发送失败，请稍后重试。")
+                        return
+        else:
+             # 如果文件不存在，或者其他原因导致 message_to_send 为空
+            logger.error("未找到有效的文件或消息组件，跳过发送。")
+            return
 
-        for send_attempt in range(MAX_SEND_RETRIES + 1):
-            try:
-                content_to_send = []
-                
-                if reply_mode == 0: content_to_send = [Comp.Plain(info_text)]
-                elif reply_mode == 1: 
-                    if platform == 'bili':
-                        cover_url = result.get("cover")
-                        if cover_url:
-                            if zhuanfa:
-                                ns = Nodes([]); ns.nodes.append(self._create_node(event, [Comp.Image.fromURL(cover_url)])); ns.nodes.append(self._create_node(event, [Comp.Plain(info_text)]))
-                                content_to_send = [ns]
-                            else:
-                                yield event.chain_result([Comp.Image.fromURL(cover_url)])
-                                content_to_send = [Comp.Plain(info_text)]
-                        else: content_to_send = [Comp.Plain("封面图片获取失败\n" + info_text)]
-                    else: content_to_send = [Comp.Plain(info_text)]
-                elif reply_mode == 2 or reply_mode == 3: # 带视频 或 完整
-                    if media_component:
-                        if zhuanfa and platform == 'bili':
-                            if reply_mode == 3 and result.get("cover"):
-                                ns = Nodes([]); ns.nodes.append(self._create_node(event, [Comp.Image.fromURL(result["cover"])])); ns.nodes.append(self._create_node(event, [Comp.Plain(info_text)]))
-                                yield event.chain_result([ns])
-                            elif reply_mode == 2:
-                                yield event.chain_result([Comp.Plain(info_text)])
-                        
-                        content_to_send = [media_component]
-                    else: content_to_send = [Comp.Plain(info_text)]
-                elif reply_mode == 4: # 纯视频
-                    if media_component: content_to_send = [media_component]
-
-                if content_to_send:
-                    yield event.chain_result(content_to_send)
-                    logger.info("消息发送成功。")
-                
-                logger.info(f"最终消息发送成功 (总尝试次数: {send_attempt + 1})。")
-                break
-                
-            except Exception as e:
-                if send_attempt < MAX_SEND_RETRIES:
-                    logger.warning(f"消息发送失败 (第 {send_attempt + 1} 次)，等待 2 秒后重试... 错误: {e}")
-                    await asyncio.sleep(2)
-                else:
-                    logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
-                    yield event.plain_result("警告：视频下载成功，但平台消息发送失败，请稍后查看。")
-                    return
-
-        # 4. 文件清理 (在所有回复发送完成后执行)
+        # 4. 文件清理
         download_dir_rel = f"data/plugins/astrbot_plugin_video_analysis/download_videos/{platform}"
         logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_rel})")
         await async_delete_old_files(download_dir_rel, self.delete_time)
@@ -157,8 +115,8 @@ class videoAnalysis(Star):
         """
         Bilibili 解析和下载核心逻辑
         """
-        quality = self.bili_quality; reply_mode = self.bili_reply_mode; url_mode = self.bili_url_mode; use_login = self.bili_use_login
-        videos_download = reply_mode in [2, 3, 4]; zhuanfa = self.Merge_and_forward
+        quality = self.bili_quality; use_login = self.bili_use_login
+        videos_download = True
         
         result = None
         for attempt in range(MAX_PROCESS_RETRIES + 1):
