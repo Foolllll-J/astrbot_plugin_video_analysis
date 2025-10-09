@@ -31,6 +31,12 @@
           "type": "bool",
           "default": false
     },
+    "bili_smart_downgrade":{
+        "description": "是否根据时长和文件大小限制自动降级B站视频清晰度",
+        "type": "bool",
+        "default": true,
+        "hint" :"开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制"
+    },
     "douyin_api_url": {
         "description": "抖音/TikTok 外部解析 API 地址",
         "hint": "未填写则禁用抖音解析。",

@@ -19,6 +19,34 @@ YUTTO_PATH = "/root/.local/bin/yutto"
 log_callback = logger.info
 COOKIE_VALID = None
 
+# 估算码率映射表 (基于 B站实际数据，单位：Mbps)
+ESTIMATED_BITRATES_MBPS = {
+    120: 5.5,  # 4K
+    112: 2.6,  # 1080P+
+    80: 1.4,   # 1080P
+    64: 0.65,  # 720P
+    32: 0.35,  # 480P
+    16: 0.25,  # 360P
+}
+
+def estimate_size(quality_qn: int, duration_seconds: int) -> float:
+    """
+    根据 B站估算码率和时长，计算文件大小（MB）。
+    
+    Args:
+        quality_qn: B站质量代码（如 80, 64）。
+        duration_seconds: 视频时长（秒）。
+    
+    Returns:
+        估算文件大小（MB）。
+    """
+    # 码率 (Mbps) / 8 = 码率 (MB/s)
+    # 使用 .get() 确保如果质量代码不在表中，默认为 1.0 Mbps
+    bitrate_mbps = ESTIMATED_BITRATES_MBPS.get(quality_qn, 1.0) 
+    # duration_seconds * (bitrate_mbps / 8)
+    return (bitrate_mbps * duration_seconds) / 8
+
+
 def set_log_callback(callback):
     global log_callback
     log_callback = callback
