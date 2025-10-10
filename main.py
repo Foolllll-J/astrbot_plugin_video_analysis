@@ -18,6 +18,7 @@ from .auto_delete import delete_old_files
 
 MAX_PROCESS_RETRIES = 0
 MAX_SEND_RETRIES = 2
+MAX_QUALITY_DOWNSCALE = 3
 
 async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
     loop = asyncio.get_event_loop()
@@ -118,92 +119,117 @@ class videoAnalysis(Star):
     async def _handle_bili_parsing(self, event: AstrMessageEvent, url: str):
         """
         Bilibili 解析和下载核心逻辑
-        【最终优化】：根据 max_video_size 和估算码率，动态降低清晰度（受开关控制）。
         """
-        # 降级映射表：当前质量 -> 降级质量 (用于循环)
+        # 降级映射表：当前质量 -> 降级质量
         DOWNGRADE_MAP = {120: 112, 112: 80, 80: 64, 64: 32, 32: 16, 16: 16}
         
         initial_quality = self.bili_quality
         max_size = self.max_video_size 
         use_login = self.bili_use_login
         videos_download = True
-        result = None
         
-        for attempt in range(MAX_PROCESS_RETRIES + 1):
-            try:
-                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
-                
-                # --- 步骤 1: 预解析视频信息 (获取 BVID 和 Duration) ---
-                bvid_match = REG_BV.search(url)
-                av_match = REG_AV.search(url)
-                short_url_match = REG_B23.search(url)
-                
-                video_info = None
-                if short_url_match:
-                    video_info = await parse_b23(short_url_match.group(0))
-                elif bvid_match:
-                    video_info = await parse_video(bvid_match.group(0))
-                elif av_match:
-                    bvid = av2bv(av_match.group(0))
-                    video_info = await parse_video(bvid) if bvid else None
+        result = None
+        current_quality = initial_quality
+        download_attempts = 0 # 记录总下载尝试次数
+        
+        # --- 步骤 1: 预解析视频信息 ---
+        bvid_match = REG_BV.search(url)
+        av_match = REG_AV.search(url)
+        short_url_match = REG_B23.search(url)
+        
+        video_info = None
+        if short_url_match:
+            video_info = await parse_b23(short_url_match.group(0))
+        elif bvid_match:
+            video_info = await parse_video(bvid_match.group(0))
+        elif av_match:
+            bvid = av2bv(av_match.group(0))
+            video_info = await parse_video(bvid) if bvid else None
 
-                # --- 步骤 2: 自适应降级逻辑 (根据文件大小上限) ---
-                current_quality = initial_quality
-                duration = video_info.get("duration", 0) if video_info else 0
-                
+        if not video_info:
+            yield event.plain_result("抱歉，无法解析视频信息，无法进行下载。请稍后重试。")
+            return
+            
+        duration = video_info.get("duration", 0)
+        
+        # --- 步骤 2: 清晰度智能降级预估循环 ---
+        for downgrade_count in range(MAX_QUALITY_DOWNSCALE + 1): 
+            if downgrade_count == 0:
+                target_quality = initial_quality
                 if self.bili_smart_downgrade and duration > 0:
-                    
-                    # 循环降级，直到估算文件大小低于 max_size
-                    while current_quality >= 16:
-                        estimated_size_mb = estimate_size(current_quality, duration)
-                        
-                        if estimated_size_mb <= max_size:
-                            # 估算大小在限制内，跳出循环，使用当前质量
-                            logger.info(f"智能降级：估算大小 {estimated_size_mb:.2f}MB 满足限制 {max_size}MB。使用质量 {current_quality}。")
-                            break
-                        
-                        # 如果估算大小超出限制，则尝试降级
-                        next_quality = DOWNGRADE_MAP.get(current_quality)
-                        
-                        if next_quality is None or next_quality == current_quality:
-                            # 达到最低质量，但大小仍然超出限制
-                            logger.warning(f"智能降级：达到最低质量 {current_quality}，但估算大小 {estimated_size_mb:.2f}MB 仍超限。将以最低质量下载。")
-                            break 
-                        
-                        logger.info(f"智能降级：估算大小 {estimated_size_mb:.2f}MB 超出限制 {max_size}MB。尝试降级到 {next_quality}。")
-                        current_quality = next_quality
+                    temp_quality = initial_quality
+                    while temp_quality >= 16:
+                        estimated_size_mb = estimate_size(temp_quality, duration)
+                        if estimated_size_mb <= max_size: break
+                        next_q = DOWNGRADE_MAP.get(temp_quality)
+                        if next_q is None or next_q == temp_quality: break
+                        temp_quality = next_q
+                    target_quality = temp_quality
+                    logger.info(f"智能预估：视频时长 {duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。")
                 
-                elif not self.bili_smart_downgrade:
-                    logger.info(f"智能降级已禁用，使用配置质量 {initial_quality}。")
-                elif duration == 0:
-                    logger.warning("预解析视频信息失败或未获取到时长，使用默认质量进行下载。")
-                
-                # --- 步骤 3: 使用调整后的质量进行下载 ---
-                result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None)
-                
-                logger.info(f"process_bili_video 返回结果：{result}")
-                
-                if not result:
-                    if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
-                    else: logger.error("process_bili_video 连续返回空值，最终失败."); break
-                
-                file_path_rel = result.get("video_path")
-                if file_path_rel and os.path.exists(file_path_rel): logger.info(f"第 {attempt + 1} 次尝试成功，文件已找到."); break
-                if attempt < MAX_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.");
-            except Exception as e:
-                if attempt < MAX_PROCESS_RETRIES: logger.error(f"第 {attempt + 1} 次尝试失败，发生异常: {e}. 等待后重试...", exc_info=False)
-                else: logger.error(f"第 {attempt + 1} 次尝试失败，发生致命异常: {e}", exc_info=True); break
-            if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败."); break
-            await asyncio.sleep(2)
+                current_quality = target_quality # 确定本次尝试的质量
 
-        if not result or not result.get("video_path") or not os.path.exists(result["video_path"]):
-            yield event.plain_result("抱歉，由于网络或解析问题，无法完成视频处理。请稍后重试。")
+            # 如果不是第一次循环 (即前一次下载失败且文件过大)，则必须降级
+            elif download_attempts > 0:
+                current_quality = DOWNGRADE_MAP.get(current_quality)
+                if current_quality is None or current_quality == DOWNGRADE_MAP.get(current_quality, 0): 
+                    logger.error("已尝试最低清晰度，或达到降级上限。停止降级重试。")
+                    break 
+                logger.warning(f"文件超限，启动后置校验降级重试。新质量: {current_quality} (第 {downgrade_count} 次降级)。")
+
+            download_attempts += 1
+            logger.info(f"[INFO] 正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})...")
+
+            try:
+                # 实际下载
+                result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None)
+            
+            except Exception as e:
+                logger.error(f"下载失败（yutto执行异常）: {e}", exc_info=False)
+                # 如果 yutto 自身执行失败，不认为是文件过大，跳出降级循环，走最终失败流程
+                break 
+
+            file_path_rel = result.get("video_path") if result else None
+            
+            if not file_path_rel or not os.path.exists(file_path_rel):
+                logger.warning("下载未成功，文件未找到。不进行大小校验，停止降级重试。")
+                # 如果文件根本没下载下来，不能进行降级重试，直接走最终失败流程
+                break 
+                
+            file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
+            
+            if file_size_mb <= max_size:
+                logger.info(f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。")
+                # 成功找到合适文件，跳出外层降级循环
+                break 
+            
+            # 文件过大，需要重试降级
+            logger.warning(f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。删除文件，准备降级重试...")
+            try:
+                os.remove(file_path_rel)
+                logger.info(f"已删除超限文件: {file_path_rel}")
+            except Exception as e:
+                logger.error(f"删除超限文件失败: {e}")
+                # 即使删除失败也要继续降级重试
+
+        # --- 步骤 3: 最终结果判断与发送 ---
+
+        file_path_rel = result.get("video_path") if result else None
+        
+        # 最终判断下载是否成功（文件必须存在且大小合规）
+        if not file_path_rel or not os.path.exists(file_path_rel) or os.path.getsize(file_path_rel) / (1024 * 1024) > max_size:
+            # 无论是因为下载失败、文件丢失还是最后一次下载仍超限，都回复失败文本
+            yield event.plain_result("抱歉，由于网络、解析问题，或视频文件超出限制，无法完成视频处理。请稍后重试。")
+            
+            # 清理目录
             download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
             await async_delete_old_files(download_dir_rel, self.delete_time)
             return
 
+        # 文件下载成功且大小合规，进行发送
         async for response in self._process_and_send(event, result, 'bili'):
             yield response
+
 
     async def _handle_douyin_parsing(self, event: AstrMessageEvent, url: str):
         """
