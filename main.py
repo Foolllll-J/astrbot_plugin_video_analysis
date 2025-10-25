@@ -31,18 +31,19 @@ class videoAnalysis(Star):
         super().__init__(context)
         self.nap_server_address = config.get("nap_server_address", "localhost")
         self.nap_server_port = config.get("nap_server_port", 3658)
-        self.delete_time = config.get("delete_time", 60)
+        self.group_whitelist: List[int] = [int(gid) for gid in config.get("group_whitelist", [])]
+        self.delete_time = config.get("delete_time", 60)    
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = config.get("bili_quality", 32)
         self.bili_use_login = config.get("bili_use_login", False)
         self.bili_smart_downgrade = config.get("bili_smart_downgrade", True) # 【加载新增配置】
         self.douyin_api_url = config.get("douyin_api_url", None)
         
-        logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}")
+        logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, 启用群组: {self.group_whitelist if self.group_whitelist else '全部'}")
 
     async def _send_file_if_needed(self, file_path: str) -> str:
         """Helper function to send file through NAP server if needed"""
-        logger.debug(f"检查NAP配置... 地址: {self.nap_server_address}, 端口: {self.nap_server_port}")
+        logger.info(f"检查NAP配置... 地址: {self.nap_server_address}, 端口: {self.nap_server_port}")
         if self.nap_server_address != "localhost":
             return await send_file(file_path, HOST=self.nap_server_address, PORT=self.nap_server_port)
         logger.info(f"检测到本地地址，直接使用文件路径：{file_path}")
@@ -277,12 +278,24 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     """
     【架构总控】自动检测消息中是否包含分享链接，并分发给相应的处理器。
     """
-    logger.debug(f"接收到新消息，内容：{event.message_str}")
+    group_id = event.get_group_id()
+    if group_id:
+        try:
+            group_id = int(group_id)
+        except ValueError:
+            logger.info(f"无法将群组 ID '{group_id}' 转换为整数，跳过过滤。")
+            return
+            
+        if self.group_whitelist and group_id not in self.group_whitelist:
+            logger.info(f"群组 ID {group_id} 不在群组白名单中 ({self.group_whitelist})，跳过视频解析。")
+            return
+
+    logger.info(f"接收到新消息，内容：{event.message_str}")
     message_str = event.message_str
     message_obj_str = str(event.message_obj)
 
     if re.search(r"reply", message_obj_str):
-        logger.debug("消息是回复类型，跳过解析。")
+        logger.info("消息是回复类型，跳过解析。")
         return
 
     # --- 1. 检查 Bilibili 链接 ---
@@ -316,4 +329,4 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             yield response
         return
         
-    logger.debug("未匹配到任何支持的视频链接，跳过。")
+    logger.info("未匹配到任何支持的视频链接，跳过。")

@@ -9,6 +9,12 @@
         "type": "int",
         "default": 3658
     },
+    "group_whitelist": { 
+        "description": "群聊白名单",
+        "hint": "视频解析群组白名单。只有在此列表中的群组收到的消息才尝试解析。留空表示在所有群组启用。",
+        "type": "list",
+        "default": []
+    },
     "delete_time":{
         "description": "删除文件时间（单位分钟）",
         "type": "int",
