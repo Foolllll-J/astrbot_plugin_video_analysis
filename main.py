@@ -294,15 +294,12 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             return
             
         if self.group_whitelist and group_id not in self.group_whitelist:
-            logger.info(f"群组 ID {group_id} 不在群组白名单中 ({self.group_whitelist})，跳过视频解析。")
             return
 
-    logger.info(f"接收到新消息，内容：{event.message_str}")
     message_str = event.message_str
     message_obj_str = str(event.message_obj)
 
     if re.search(r"reply", message_obj_str):
-        logger.info("消息是回复类型，跳过解析。")
         return
 
     # --- 1. 检查 Bilibili 链接 ---
@@ -335,5 +332,3 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         async for response in self._handle_douyin_parsing(event, url):
             yield response
         return
-        
-    logger.info("未匹配到任何支持的视频链接，跳过。")
