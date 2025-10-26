@@ -1,11 +1,13 @@
 {
     "nap_server_address": {
-        "description": "NAP cat 服务地址,若与服务器在同一服务器上请填写localhost",
+        "description": "Napcat服务地址",
+        "hint": "若与服务器在同一服务器上可保持默认。",
         "type": "string",
         "default": "localhost"
     },
     "nap_server_port": {
-        "description": "NAP cat 所处服务器接收文件端口，在同一服务器上可以不填",
+        "description": "Napcat所处服务器接收文件端口",
+        "hint": "若与服务器在同一服务器上可保持默认。",
         "type": "int",
         "default": 3658
     },
@@ -17,31 +19,33 @@
     },
     "delete_time":{
         "description": "删除文件时间（单位分钟）",
+        "hint": "视频文件保存的时间，超过此时间将被自动删除。",
         "type": "int",
         "default": 60
     },
     "max_video_size":{
         "description": "最大视频大小（单位MB）",
+        "hint": "视频文件的最大允许大小，超过此限制将无法发送。",
         "type": "int",
         "default": 100
     },
     "bili_quality":{
         "description": "B站视频清晰度",
+        "hint" :"16: 360P|32: 480P|64: 720P|80: 1080P|112: 1080P+（高码率）|120: 4K",
         "type": "int",
-        "default":32,
-        "hint" :"16: 360P|32: 480P|64: 720P|80: 1080P|112: 1080P+（高码率）|120: 4K"
+        "default": 64
     },
     "bili_use_login": {
           "description": "是否使用登录状态下载B站视频",
-          "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式",
+          "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式。",
           "type": "bool",
           "default": false
     },
     "bili_smart_downgrade":{
         "description": "是否根据时长和文件大小限制自动降级B站视频清晰度",
+        "hint" :"开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制。",
         "type": "bool",
-        "default": true,
-        "hint" :"开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制"
+        "default": true
     },
     "douyin_api_url": {
         "description": "抖音/TikTok 外部解析 API 地址",

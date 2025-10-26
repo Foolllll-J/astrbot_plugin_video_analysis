@@ -168,7 +168,7 @@ class videoAnalysis(Star):
                     target_quality = temp_quality
                     logger.info(f"智能预估：视频时长 {duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。")
                 
-                current_quality = target_quality # 确定本次尝试的质量
+                current_quality = target_quality
 
             # 如果不是第一次循环 (即前一次下载失败且文件过大)，则必须降级
             elif download_attempts > 0:
@@ -182,26 +182,22 @@ class videoAnalysis(Star):
             logger.info(f"[INFO] 正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})...")
 
             try:
-                # 实际下载
                 result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None)
             
             except Exception as e:
                 logger.error(f"下载失败（yutto执行异常）: {e}", exc_info=False)
-                # 如果 yutto 自身执行失败，不认为是文件过大，跳出降级循环，走最终失败流程
                 break 
 
             file_path_rel = result.get("video_path") if result else None
             
             if not file_path_rel or not os.path.exists(file_path_rel):
                 logger.warning("下载未成功，文件未找到。不进行大小校验，停止降级重试。")
-                # 如果文件根本没下载下来，不能进行降级重试，直接走最终失败流程
                 break 
                 
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             
             if file_size_mb <= max_size:
                 logger.info(f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。")
-                # 成功找到合适文件，跳出外层降级循环
                 break 
             
             # 文件过大，需要重试降级
@@ -211,21 +207,33 @@ class videoAnalysis(Star):
                 logger.info(f"已删除超限文件: {file_path_rel}")
             except Exception as e:
                 logger.error(f"删除超限文件失败: {e}")
-                # 即使删除失败也要继续降级重试
 
         # --- 步骤 3: 最终结果判断与发送 ---
 
         file_path_rel = result.get("video_path") if result else None
+
+        is_download_successful = file_path_rel and os.path.exists(file_path_rel)
+        is_size_valid = False
+        final_size_mb = 0
         
+        if is_download_successful:
+            final_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
+            is_size_valid = final_size_mb <= max_size
+
         # 最终判断下载是否成功（文件必须存在且大小合规）
-        if not file_path_rel or not os.path.exists(file_path_rel) or os.path.getsize(file_path_rel) / (1024 * 1024) > max_size:
-            # 无论是因为下载失败、文件丢失还是最后一次下载仍超限，都回复失败文本
-            yield event.plain_result("抱歉，由于网络、解析问题，或视频文件超出限制，无法完成视频处理。请稍后重试。")
-            
-            # 清理目录
-            download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
-            await async_delete_old_files(download_dir_rel, self.delete_time)
-            return
+        if not is_download_successful or not is_size_valid:
+            error_message = ""
+            if not is_download_successful:
+                # 下载/解析/文件创建失败
+                error_message = "抱歉，由于网络或解析问题，无法获取视频文件。"
+                logger.error("B站视频解析最终失败：下载文件不存在或路径无效。")
+            elif not is_size_valid:
+                error_message = f"该视频文件大小为 {final_size_mb:.2f}MB，超过了 {max_size}MB 的最大限制。"
+                logger.error(f"B站视频解析最终失败：文件 ({final_size_mb:.2f}MB) 仍然超出限制。")
+            else:
+                error_message = "抱歉，视频处理过程中出现未知错误。"
+
+            yield event.plain_result(error_message)
 
         # 文件下载成功且大小合规，进行发送
         async for response in self._process_and_send(event, result, 'bili'):
@@ -243,7 +251,6 @@ class videoAnalysis(Star):
             try:
                 logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1}")
                 
-                # FIX: 将 API 地址传递给 douyin_get.py
                 result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url) 
                 
                 if not result:
@@ -264,7 +271,7 @@ class videoAnalysis(Star):
             await asyncio.sleep(2)
         
         if not result or not os.path.exists(result["video_path"]):
-            yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。请稍后重试。")
+            yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
             download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/douyin"
             await async_delete_old_files(download_dir_rel, self.delete_time)
             return
