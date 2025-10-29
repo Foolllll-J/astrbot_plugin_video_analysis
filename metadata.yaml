@@ -1,4 +1,5 @@
 name: astrbot_plugin_video_analysis # 这是你的插件的唯一识别名。
+display_name: Video Analysis # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
 desc: 支持对来自视频平台的分享进行解析并以视频形式发送。 # 插件简短描述
 version: v0.2 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: Foolllll # 作者
