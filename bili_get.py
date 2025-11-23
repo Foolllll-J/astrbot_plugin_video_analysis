@@ -357,7 +357,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         log_callback(f"[INFO] yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
         raise Exception("yutto 运行成功但未能生成最终文件，可能是文件名或路径设置问题。")
 
-async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None):
+async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None, download_dir=None):
     """主处理函数 (现在调用 yutto) """
     log_callback(f"[INFO] process_bili_video: 开始处理B站链接: {url}")
     
@@ -372,7 +372,8 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
     if not video_info: log_callback("解析视频信息失败"); return None
     stats = video_info.get("stats", {}); bvid = video_info.get("bvid")
     
-    download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
+    if download_dir is None:
+        download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/bili"
     cookies_file = COOKIE_FILE
     
     # 1. 检查本地缓存 (yutto生成的格式为 BVID.mp4)

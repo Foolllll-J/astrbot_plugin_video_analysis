@@ -2,6 +2,7 @@ from astrbot.api.all import *
 from astrbot.api.message_components import Node, Plain, Image, Video, Nodes
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
+from astrbot.api.star import StarTools
 import astrbot.api.message_components as Comp
 
 import re
@@ -38,6 +39,11 @@ class videoAnalysis(Star):
         self.bili_use_login = config.get("bili_use_login", False)
         self.bili_smart_downgrade = config.get("bili_smart_downgrade", True) # 【加载新增配置】
         self.douyin_api_url = config.get("douyin_api_url", None)
+        
+        # 设置数据目录
+        self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
+        self.download_dir = os.path.join(self.data_dir, "download_videos")
+        os.makedirs(self.download_dir, exist_ok=True)
         
         logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, 启用群组: {self.group_whitelist if self.group_whitelist else '全部'}")
 
@@ -113,9 +119,9 @@ class videoAnalysis(Star):
             return
 
         # 4. 文件清理
-        download_dir_rel = f"data/plugins/astrbot_plugin_video_analysis/download_videos/{platform}"
-        logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_rel})")
-        await async_delete_old_files(download_dir_rel, self.delete_time)
+        download_dir_platform = os.path.join(self.download_dir, platform)
+        logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_platform})")
+        await async_delete_old_files(download_dir_platform, self.delete_time)
 
     async def _handle_bili_parsing(self, event: AstrMessageEvent, url: str):
         """
@@ -182,7 +188,7 @@ class videoAnalysis(Star):
             logger.info(f"[INFO] 正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})...")
 
             try:
-                result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None)
+                result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None, download_dir=os.path.join(self.download_dir, "bili"))
             
             except Exception as e:
                 logger.error(f"下载失败（yutto执行异常）: {e}", exc_info=False)
@@ -244,7 +250,7 @@ class videoAnalysis(Star):
         """
         抖音解析和下载核心逻辑
         """
-        download_dir = "data/plugins/astrbot_plugin_video_analysis/download_videos/douyin"
+        download_dir = os.path.join(self.download_dir, "douyin")
         result = None
 
         for attempt in range(MAX_PROCESS_RETRIES + 1):
@@ -272,8 +278,8 @@ class videoAnalysis(Star):
         
         if not result or not os.path.exists(result["video_path"]):
             yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
-            download_dir_rel = "data/plugins/astrbot_plugin_video_analysis/download_videos/douyin"
-            await async_delete_old_files(download_dir_rel, self.delete_time)
+            download_dir_douyin = os.path.join(self.download_dir, "douyin")
+            await async_delete_old_files(download_dir_douyin, self.delete_time)
             return
 
         async for response in self._process_and_send(event, result, 'douyin'):
