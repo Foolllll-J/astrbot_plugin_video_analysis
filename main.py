@@ -12,7 +12,7 @@ import asyncio
 from .file_send_server import send_file
 from .bili_get import (
     process_bili_video, REG_B23, REG_BV, REG_AV, av2bv, parse_b23, parse_video,
-    estimate_size
+    estimate_size, init_bili_module, bili_login, check_cookie_valid
 )
 from .douyin_get import process_douyin_video 
 from .auto_delete import delete_old_files
@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频", "0.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -44,6 +44,10 @@ class videoAnalysis(Star):
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
         self.download_dir = os.path.join(self.data_dir, "download_videos")
         os.makedirs(self.download_dir, exist_ok=True)
+        
+        # 初始化 bili_get 模块
+        cookie_file = os.path.join(self.data_dir, "bili_cookies.json")
+        init_bili_module(cookie_file)
         
         logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, 启用群组: {self.group_whitelist if self.group_whitelist else '全部'}")
 
@@ -284,6 +288,75 @@ class videoAnalysis(Star):
 
         async for response in self._process_and_send(event, result, 'douyin'):
             yield response
+
+    @filter.command("bili_login")
+    async def handle_bili_login(self, event: AstrMessageEvent):
+        """
+        处理 B站 登录指令
+        通过聊天消息发送二维码给管理员，实现远程登录
+        """
+        logger.info("收到 B站登录指令")
+        
+        # 生成二维码
+        login_task, qr_data = await bili_login()
+        
+        if not qr_data:
+            yield event.plain_result("生成登录二维码失败，请稍后重试。")
+            return
+        
+        temp_image_path = None
+        # 发送二维码图片给用户
+        try:
+            # 将 base64 二维码转换为图片组件
+            import base64
+            from io import BytesIO
+            qr_image_data = base64.b64decode(qr_data["image_base64"])
+            
+            # 保存临时文件
+            temp_image_path = os.path.join(self.data_dir, "bili_login_qrcode.png")
+            with open(temp_image_path, "wb") as f:
+                f.write(qr_image_data)
+            
+            # 发送图片和提示信息
+            yield event.chain_result([
+                Plain("请使用 B站APP 扫描以下二维码登录：\n"),
+                Image.fromFileSystem(temp_image_path),
+                Plain("\n等待登录中...（最多40秒）")
+            ])
+            
+            # 等待登录完成
+            cookies = await login_task
+            
+            if cookies:
+                yield event.plain_result("✅ B站登录成功！Cookie 已保存。")
+            else:
+                yield event.plain_result("❌ 登录失败或超时，请重试。")
+                
+        except Exception as e:
+            logger.error(f"处理登录流程时出错: {e}", exc_info=True)
+            yield event.plain_result("登录过程中出现错误，请查看日志。")
+        finally:
+            # 安全删除临时二维码文件
+            if temp_image_path and os.path.exists(temp_image_path):
+                try:
+                    os.remove(temp_image_path)
+                    logger.debug(f"已删除临时二维码文件: {temp_image_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时二维码文件失败: {e}")
+    
+    @filter.command("bili_check")
+    async def handle_bili_check(self, event: AstrMessageEvent):
+        """
+        检查 B站 Cookie 是否有效
+        """
+        logger.info("收到检查 Cookie 指令")
+        
+        is_valid = await check_cookie_valid()
+        
+        if is_valid:
+            yield event.plain_result("✅ B站 Cookie 有效")
+        else:
+            yield event.plain_result("❌ B站 Cookie 无效或不存在，请使用 /bili_login 登录")
 
 
 @filter.event_message_type(EventMessageType.ALL)

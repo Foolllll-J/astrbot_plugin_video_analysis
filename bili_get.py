@@ -9,14 +9,11 @@ import base64
 from io import BytesIO
 from urllib.parse import unquote
 from astrbot.api import logger
-import subprocess 
+import subprocess
 
-COOKIE_FILE = "data/plugins/astrbot_plugin_video_analysis/bili_cookies.json"
-os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
-
+# 全局变量，由 main.py 初始化时设置
+COOKIE_FILE = None
 YUTTO_PATH = "/root/.local/bin/yutto"
-
-log_callback = logger.info
 COOKIE_VALID = None
 
 # 估算码率映射表 (基于 B站实际数据，单位：Mbps)
@@ -47,9 +44,16 @@ def estimate_size(quality_qn: int, duration_seconds: int) -> float:
     return (bitrate_mbps * duration_seconds) / 8
 
 
-def set_log_callback(callback):
-    global log_callback
-    log_callback = callback
+def init_bili_module(cookie_file_path: str):
+    """初始化 bili_get 模块，设置 Cookie 文件路径
+    
+    Args:
+        cookie_file_path: Cookie 文件的完整路径
+    """
+    global COOKIE_FILE
+    COOKIE_FILE = cookie_file_path
+    os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
+    logger.info(f"bili_get 模块已初始化，Cookie 路径: {COOKIE_FILE}")
 
 CONFIG = {
     "VIDEO": {"enable": True, "send_link": False, "send_video": True}
@@ -121,12 +125,12 @@ async def check_cookie_valid():
     COOKIE_VALID = None
     cookies = await load_cookies()
     if not cookies:
-        log_callback("[DEBUG] 未找到Cookie文件或Cookie文件为空，需要登录")
+        logger.debug("未找到Cookie文件或Cookie文件为空，需要登录")
         return False
     required_fields = {"SESSDATA": lambda v: len(v) > 30 and ',' in v, "bili_jct": lambda v: len(v) == 32, "DedeUserID": lambda v: v.isdigit()}
     for field, validator in required_fields.items():
         if field not in cookies or not validator(str(cookies[field])):
-            log_callback(f"[DEBUG] Cookie字段验证失败: {field} = {cookies.get(field)}")
+            logger.debug(f"Cookie字段验证失败: {field} = {cookies.get(field)}")
             return False
     url = "https://api.bilibili.com/x/member/web/account"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://space.bilibili.com/", "Origin": "https://space.bilibili.com", "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])}
@@ -168,43 +172,61 @@ async def save_cookies_dict(cookies):
     try:
         async with aiofiles.open(COOKIE_FILE, "w", encoding="utf-8") as f:
             await f.write(json.dumps(cookies, ensure_ascii=False, indent=2))
-        log_callback(f"Cookie已保存到: {COOKIE_FILE}")
+        logger.info(f"Cookie已保存到: {COOKIE_FILE}")
         return True
     except Exception as e:
-        log_callback(f"保存Cookie失败: {str(e)}")
+        logger.error(f"保存Cookie失败: {str(e)}")
         return False
 
 async def load_cookies():
     """从文件加载Cookie"""
     if not os.path.exists(COOKIE_FILE):
-        log_callback(f"Cookie文件不存在: {COOKIE_FILE}")
+        logger.warning(f"Cookie文件不存在: {COOKIE_FILE}")
         return None
     try:
         async with aiofiles.open(COOKIE_FILE, "r", encoding="utf-8") as f:
             content = await f.read()
-            if not content.strip(): log_callback("Cookie文件为空"); return None
+            if not content.strip(): logger.warning("Cookie文件为空"); return None
             cookies = json.loads(content); return cookies
-    except json.JSONDecodeError: log_callback("Cookie文件格式错误"); return None
-    except Exception as e: log_callback(f"加载Cookie失败: {str(e)}"); return None
+    except json.JSONDecodeError: logger.error("Cookie文件格式错误"); return None
+    except Exception as e: logger.error(f"加载Cookie失败: {str(e)}"); return None
 
 async def generate_qrcode():
-    """生成B站登录二维码（新版API）"""
+    """生成B站登录二维码
+    
+    Returns:
+        包含二维码信息的字典，格式：
+        {
+            "qrcode_key": str,  # 用于轮询登录状态
+            "image_base64": str,  # base64 编码的二维码图片
+            "url": str  # 二维码包含的登录URL
+        }
+    """
     url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
     data = await bili_request(url)
-    if data.get("code") != 0: print(f"获取二维码失败: {data.get('message')}"); return None
-    qr_data = data["data"]; qr_url = qr_data["url"]; qrcode_key = qr_data["qrcode_key"]
+    if data.get("code") != 0:
+        logger.error(f"获取二维码失败: {data.get('message')}")
+        return None
+    qr_data = data["data"]
+    qr_url = qr_data["url"]
+    qrcode_key = qr_data["qrcode_key"]
+    
+    # 生成二维码图片
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
-    qr.add_data(qr_url); qr.make(fit=True)
+    qr.add_data(qr_url)
+    qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
-    buffered = BytesIO(); img.save(buffered, format="PNG"); img_str = base64.b64encode(buffered.getvalue()).decode()
-    image_dir = "data/plugins/astrbot_plugin_video_analysis/image"; os.makedirs(image_dir, exist_ok=True)
-    image_path = os.path.join(image_dir, "bili_login_qrcode.png")
-    with open(image_path, "wb") as f: f.write(base64.b64decode(qr_data["image_base64"]))
-    print(f"\n如果上方二维码显示异常，请查看二维码文件: {image_path}"); logger.info(f"二维码图片已保存到: {image_path}")
+    
+    # 转换为 base64
+    buffered = BytesIO()
+    img.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    
+    logger.info("B站登录二维码已生成")
     return {"qrcode_key": qrcode_key, "image_base64": img_str, "url": qr_url}
 
 async def check_login_status(qrcode_key):
-    """检查登录状态（新版API）"""
+    """检查登录状态"""
     url = f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"}
     try:
@@ -213,51 +235,70 @@ async def check_login_status(qrcode_key):
                 result = await response.json(); return result
     except aiohttp.ClientError: return {"code": -1, "message": "检查登录状态失败"}
 
-async def bili_login(event=None):
-    """B站扫码登录流程（新版API）"""
-    log_callback("正在生成B站登录二维码..."); qr_data = await generate_qrcode()
-    if not qr_data: return None
-    log_callback("\n请使用B站APP扫描以下二维码登录:")
+async def bili_login():
+    """B站扫码登录流程（新版API）
+    
+    此函数用于通过指令触发登录，返回二维码数据供调用者处理。
+    不再在控制台打印二维码，而是返回数据给上层应用，
+    以便通过聊天消息发送给管理员。
+    
+    Returns:
+        登录任务和二维码数据的元组 (login_task, qr_data)
+        login_task: asyncio.Task 对象，用于等待登录完成
+        qr_data: 包含二维码信息的字典
+    """
+    logger.info("正在生成B站登录二维码...")
+    qr_data = await generate_qrcode()
+    if not qr_data:
+        return None, None
+    
+    logger.info("B站登录二维码已生成，等待扫码...")
     qrcode_key = qr_data["qrcode_key"]
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=1, border=1)
-    qr.add_data(qr_data["url"]); qr.make(fit=True)
-    matrix = qr.get_matrix(); qr_text = "\n======= B站登录二维码 =======\n"
-    for row in matrix:
-        line = "";
-        for cell in row: line += "██" if cell else "  "
-        qr_text += line + "\n"
-    qr_text += "==========================\n"
-    print(qr_text); from astrbot.api import logger; logger.info("B站登录二维码已显示在控制台"); logger.info(qr_text)
-    image_path = os.path.join("data/plugins/astrbot_plugin_video_analysis/image", "bili_login_qrcode.png")
-    print(f"\n如果上方二维码显示异常，请查看二维码文件: {image_path}"); logger.info(f"二维码图片已保存到: {image_path}")
-    logger.info("如果无法扫描，可复制下方base64码用在线工具解析:"); logger.info(f"data:image/png;base64,{qr_data['image_base64'][:50]}...")
-    login_task = asyncio.create_task(check_login_status_loop(qrcode_key)); return login_task
+    
+    # 创建登录状态检查任务
+    login_task = asyncio.create_task(check_login_status_loop(qrcode_key))
+    
+    return login_task, qr_data
 
 async def check_login_status_loop(qrcode_key):
     """循环检查登录状态，直到登录成功或超时"""
     logger.info("等待登录...（最多40秒）")
     for _ in range(40):
-        await asyncio.sleep(1); status = await check_login_status(qrcode_key)
+        await asyncio.sleep(1)
+        status = await check_login_status(qrcode_key)
         if status.get("code") == 0:
             data = status.get("data", {})
             if data.get("code") == 0:
-                log_callback("\n登录成功!")
+                logger.info("登录成功!")
                 try:
-                    url = data.get("url", ""); cookies = {}
+                    url = data.get("url", "")
+                    cookies = {}
                     if "?" in url:
                         url_params = url.split("?")[1]
                         for param in url_params.split("&"):
                             if "=" in param:
                                 key, value = param.split("=", 1)
                                 useful_keys = ["_uuid", "DedeUserID", "DedeUserID__ckMd5", "SESSDATA", "bili_jct", "bili_ticket", "bili_ticket_expires", "CURRENT_FNVAL", "CURRENT_QUALITY", "enable_feed_channel", "enable_web_push", "header_theme_version", "home_feed_column", "LIVE_BUVID", "PVID", "browser_resolution", "buvid_fp", "buvid3", "fingerprint"]
-                                if key in useful_keys: cookies[key] = unquote(value)
-                        if not cookies.get("SESSDATA") or not cookies.get("DedeUserID"): raise ValueError("获取的Cookie格式异常")
-                        log_callback(f"获取到的Cookie: {cookies}"); await save_cookies_dict(cookies); return cookies
-                    else: raise ValueError("URL格式异常，无法提取参数")
-                except Exception as e: log_callback(f"登录异常: {str(e)}"); log_callback(f"原始响应数据: {data}"); return None
-            elif data.get("code") == -2: log_callback("\n二维码已过期，请重新获取"); return None
-            elif data.get("code") == -4 or data.get("code") == -5: log_callback("请在手机上确认登录")
-    log_callback("\n登录超时，请重试"); return None
+                                if key in useful_keys:
+                                    cookies[key] = unquote(value)
+                        if not cookies.get("SESSDATA") or not cookies.get("DedeUserID"):
+                            raise ValueError("获取的Cookie格式异常")
+                        logger.info(f"获取到的Cookie: {cookies}")
+                        await save_cookies_dict(cookies)
+                        return cookies
+                    else:
+                        raise ValueError("URL格式异常，无法提取参数")
+                except Exception as e:
+                    logger.error(f"登录异常: {str(e)}")
+                    logger.debug(f"原始响应数据: {data}")
+                    return None
+            elif data.get("code") == -2:
+                logger.warning("二维码已过期，请重新获取")
+                return None
+            elif data.get("code") == -4 or data.get("code") == -5:
+                logger.debug("等待手机上确认登录")
+    logger.warning("登录超时，请重试")
+    return None
 
 def check_yutto_installed():
     """检查 yutto 是否安装在 PATH 中，或检查绝对路径"""
@@ -276,7 +317,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
     """
     yutto_cmd = YUTTO_PATH if os.path.exists(YUTTO_PATH) else 'yutto'
     if not check_yutto_installed():
-        log_callback("[FATAL] yutto 未安装或不在系统 PATH 中。无法进行下载。")
+        logger.error("yutto 未安装或不在系统 PATH 中。无法进行下载。")
         raise Exception("yutto is not installed or not found in PATH.")
 
     os.makedirs(download_dir, exist_ok=True)
@@ -292,7 +333,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
             if not sessdata:
                 raise ValueError("Cookie 文件中缺少 SESSDATA 字段。")
     except Exception as e:
-        log_callback(f"[ERROR] 无法读取或解析 JSON Cookie 文件: {cookies_file}. 错误: {e}")
+        logger.error(f"无法读取或解析 JSON Cookie 文件: {cookies_file}. 错误: {e}")
         raise Exception("无法获取 SESSDATA Cookie，请检查格式或登录状态。")
 
     # 2. 清理旧的缓存文件
@@ -301,7 +342,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
 
     # 3. 动态构建质量参数
     quality_qn = map_quality_to_height(quality)
-    log_callback(f"[DEBUG] 目标质量代码 {quality} 映射到 yutto qn: {quality_qn}。")
+    logger.debug(f"目标质量代码 {quality} 映射到 yutto qn: {quality_qn}。")
 
     # 4. 构建 yutto 命令
     cmd = [
@@ -319,7 +360,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         '--no-subtitle',                      # 通常下载视频不需要字幕
     ]
     
-    log_callback(f"[DEBUG] yutto CMD: {' '.join(cmd)}")
+    logger.debug(f"yutto CMD: {' '.join(cmd)}")
     
     # 5. 运行 yutto (使用标准的 asyncio 捕获)
     process = await asyncio.create_subprocess_exec(
@@ -328,7 +369,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         stderr=asyncio.subprocess.PIPE
     )
     
-    log_callback("[INFO] yutto 进程已成功启动。请等待下载和合并...")
+    logger.info("yutto 进程已成功启动。请等待下载和合并...")
 
     # 6. 捕获输出和等待
     stdout_data, stderr_data = await process.communicate()
@@ -336,40 +377,115 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
     # 7. 检查退出码
     if process.returncode != 0:
         error_output = stderr_data.decode(errors='ignore').strip()
-        log_callback(f"[ERROR] yutto 命令行执行完毕。退出码: {process.returncode}。")
-        log_callback(f"[ERROR] yutto 错误输出: {error_output[:1000]}...")
+        logger.error(f"yutto 命令行执行完毕。退出码: {process.returncode}。")
+        logger.error(f"yutto 错误输出: {error_output[:1000]}...")
         raise Exception(f"yutto 下载失败，请检查 yutto 日志。")
 
-    log_callback(f"[INFO] yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+    logger.info(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
 
     # 8. 检查最终文件是否存在
     if os.path.exists(output_path):
         try:
             os.utime(output_path, None) 
-            log_callback(f"[INFO] 文件时间戳已更新至当前时间，防止被自动清理。")
+            logger.info(f"文件时间戳已更新至当前时间，防止被自动清理。")
         except Exception as utime_e:
-            log_callback(f"[WARN] 无法更新文件时间戳 (os.utime 失败): {utime_e}")
+            logger.warning(f"无法更新文件时间戳 (os.utime 失败): {utime_e}")
         
-        log_callback(f"[INFO] yutto 下载成功: {output_path}")
+        logger.info(f"yutto 下载成功: {output_path}")
         return output_path
     else:
-        log_callback(f"[ERROR] yutto 运行成功但未生成文件：{output_path}。")
-        log_callback(f"[INFO] yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
+        logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
+        logger.info(f"yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
         raise Exception("yutto 运行成功但未能生成最终文件，可能是文件名或路径设置问题。")
+
+async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8):
+    """
+    使用 yutto 命令下载视频（不需要Cookie，只能下载360p及以下）。
+    """
+    yutto_cmd = YUTTO_PATH if os.path.exists(YUTTO_PATH) else 'yutto'
+    if not check_yutto_installed():
+        logger.error("yutto 未安装或不在系统 PATH 中。无法进行下载。")
+        raise Exception("yutto is not installed or not found in PATH.")
+
+    os.makedirs(download_dir, exist_ok=True)
+    
+    output_filename = f"{bvid}.mp4"
+    output_path = os.path.join(download_dir, output_filename)
+    
+    # 清理旧的缓存文件
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    # 动态构建质量参数（360p对应qn=16）
+    quality_qn = map_quality_to_height(quality)
+    logger.debug(f"目标质量代码 {quality} 映射到 yutto qn: {quality_qn}。")
+
+    # 构建 yutto 命令（不使用 -c 参数）
+    cmd = [
+        yutto_cmd,
+        'https://www.bilibili.com/video/' + bvid,
+        '-d', download_dir,                   # 存放根目录
+        '-q', str(quality_qn),                # 视频质量等级 (qn)
+        '-n', str(num_workers),               # 最大并行 Worker 数量
+        '-w',                                 # 强制覆盖
+        '--no-color',                         # 禁用颜色
+        '--no-progress',                      # 禁用进度条
+        '--subpath-template', bvid,           # 文件名为 BVID
+        '--no-danmaku',                       # 不下载弹幕
+        '--no-subtitle',                      # 不下载字幕
+    ]
+    
+    logger.debug(f"yutto CMD (no login): {' '.join(cmd)}")
+    
+    # 运行 yutto
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    logger.info("yutto 进程已成功启动（无登录模式）。请等待下载和合并...")
+
+    # 捕获输出和等待
+    stdout_data, stderr_data = await process.communicate()
+    
+    # 检查退出码
+    if process.returncode != 0:
+        error_output = stderr_data.decode(errors='ignore').strip()
+        logger.error(f"yutto 命令行执行完毕。退出码: {process.returncode}。")
+        logger.error(f"yutto 错误输出: {error_output[:1000]}...")
+        raise Exception(f"yutto 下载失败（无登录模式），请检查 yutto 日志。")
+
+    logger.info(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+
+    # 检查最终文件是否存在
+    if os.path.exists(output_path):
+        try:
+            os.utime(output_path, None) 
+            logger.info(f"文件时间戳已更新至当前时间，防止被自动清理。")
+        except Exception as utime_e:
+            logger.warning(f"无法更新文件时间戳 (os.utime 失败): {utime_e}")
+        
+        logger.info(f"yutto 下载成功（无登录模式）: {output_path}")
+        return output_path
+    else:
+        logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
+        logger.info(f"yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
+        raise Exception("yutto 运行成功但未能生成最终文件。")
 
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None, download_dir=None):
     """主处理函数 (现在调用 yutto) """
-    log_callback(f"[INFO] process_bili_video: 开始处理B站链接: {url}")
+    logger.info(f"开始处理B站链接: {url}")
     
     video_info = None
     try:
         if REG_B23.search(url): video_info = await parse_b23(REG_B23.search(url).group())
         elif REG_BV.search(url): video_info = await parse_video(REG_BV.search(url).group())
         elif REG_AV.search(url): bvid = av2bv(REG_AV.search(url).group()); video_info = await parse_video(bvid) if bvid else None
-        else: log_callback("不支持的链接格式"); return None
-    except Exception as e: log_callback(f"解析链接时发生错误: {str(e)}"); return None
+        else: logger.warning("不支持的链接格式"); return None
+    except Exception as e: logger.error(f"解析链接时发生错误: {str(e)}"); return None
     
-    if not video_info: log_callback("解析视频信息失败"); return None
+    if not video_info: logger.warning("解析视频信息失败"); return None
     stats = video_info.get("stats", {}); bvid = video_info.get("bvid")
     
     if download_dir is None:
@@ -379,22 +495,38 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
     # 1. 检查本地缓存 (yutto生成的格式为 BVID.mp4)
     cached_file = os.path.join(download_dir, f"{bvid}.mp4")
     if os.path.exists(cached_file):
-        log_callback(f"本地已存在视频文件：{cached_file}，跳过下载")
+        logger.info(f"本地已存在视频文件：{cached_file}，跳过下载")
         return {"video_path": cached_file, "title": video_info["title"], "cover": video_info["cover"], "duration": video_info["duration"], "stats": stats, "bvid": bvid, "view_count": stats["view"], "like_count": stats["like"], "danmaku_count": stats["danmaku"], "coin_count": stats["coin"], "favorite_count": stats["favorite"]}
 
     # 2. 调用 yutto 下载 (如果需要下载)
     filename = None
-    if download_flag and use_login:
-        log_callback("[INFO] 调用 yutto 进行下载 (需登录凭证)...")
-        try:
-            filename = await download_video_yutto(bvid, cookies_file, download_dir, quality=quality, num_workers=8)
-        except Exception as e:
-            log_callback(f"[WARN] yutto 高清下载失败。错误: {e}")
-            return None 
+    if download_flag:
+        if use_login:
+            logger.info("调用 yutto 进行下载 (需登录凭证)...")
+            try:
+                filename = await download_video_yutto(bvid, cookies_file, download_dir, quality=quality, num_workers=8)
+            except Exception as e:
+                logger.warning(f"yutto 高清下载失败。错误: {e}")
+                logger.info("尝试降级到360p无需登录模式...")
+                # 降级到360p（质量代码16），不使用Cookie
+                try:
+                    filename = await download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8)
+                    logger.info(f"360p 降级下载成功: {filename}")
+                except Exception as fallback_e:
+                    logger.error(f"360p 降级下载也失败: {fallback_e}")
+                    return None
+        else:
+            # 不使用登录，直接下载360p
+            logger.info("未启用登录，尝试下载360p...")
+            try:
+                filename = await download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8)
+            except Exception as e:
+                logger.warning(f"360p下载失败。错误: {e}")
+                return None
 
-    # 3. 如果 yutto 失败，或者 use_login=False，返回 None
+    # 3. 检查下载结果
     if not filename and download_flag:
-        log_callback("[WARN] 未开启登录或下载失败，无法获取视频文件。")
+        logger.warning("下载失败，无法获取视频文件。")
         return None
         
     return {
