@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -53,7 +53,6 @@ class videoAnalysis(Star):
 
     async def _send_file_if_needed(self, file_path: str) -> str:
         """Helper function to send file through NAP server if needed"""
-        logger.info(f"检查NAP配置... 地址: {self.nap_server_address}, 端口: {self.nap_server_port}")
         if self.nap_server_address != "localhost":
             return await send_file(file_path, HOST=self.nap_server_address, PORT=self.nap_server_port)
         logger.info(f"检测到本地地址，直接使用文件路径：{file_path}")
@@ -267,8 +266,13 @@ class videoAnalysis(Star):
                     if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
                     else: logger.error("process_douyin_video 连续返回空值，最终失败.")
                 
-                # 检查文件是否存在
-                if result and os.path.exists(result["video_path"]):
+                # 检查是否是图片类型
+                if result.get("type") in ["image", "images"] and result.get("image_paths"):
+                    logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result['image_paths'])} 张图片。")
+                    break
+                
+                # 检查文件是否存在（视频）
+                if result and result.get("video_path") and os.path.exists(result["video_path"]):
                     logger.info(f"第 {attempt + 1} 次尝试成功，文件已找到。")
                     break 
                 if attempt < MAX_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.")
@@ -280,7 +284,18 @@ class videoAnalysis(Star):
             if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败.")
             await asyncio.sleep(2)
         
-        if not result or not os.path.exists(result["video_path"]):
+        # 处理图片类型
+        if result and result.get("type") in ["image", "images"] and result.get("image_paths"):
+            async for response in self._send_douyin_images(event, result):
+                yield response
+            
+            # 清理文件
+            download_dir_douyin = os.path.join(self.download_dir, "douyin")
+            await async_delete_old_files(download_dir_douyin, self.delete_time)
+            return
+        
+        # 处理视频类型
+        if not result or not result.get("video_path") or not os.path.exists(result["video_path"]):
             yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
             download_dir_douyin = os.path.join(self.download_dir, "douyin")
             await async_delete_old_files(download_dir_douyin, self.delete_time)
@@ -288,12 +303,51 @@ class videoAnalysis(Star):
 
         async for response in self._process_and_send(event, result, 'douyin'):
             yield response
+    
+    async def _send_douyin_images(self, event: AstrMessageEvent, result: dict):
+        """发送抖音图片（使用合并转发）"""
+        image_paths = result.get("image_paths", [])
+        
+        if not image_paths:
+            logger.error("没有找到图片文件")
+            yield event.plain_result("抱歉，没有找到图片文件。")
+            return
+        
+        logger.info(f"准备发送 {len(image_paths)} 张图片")
+        
+        sender_id = event.get_self_id()
+        forward_nodes = []
+        
+        for idx, image_path in enumerate(image_paths, 1):
+            if not os.path.exists(image_path):
+                logger.warning(f"图片文件不存在: {image_path}")
+                continue
+            
+            try:
+                nap_file_path = await self._send_file_if_needed(image_path)
+                image_component = Image.fromFileSystem(path=nap_file_path)
+                forward_nodes.append(Node(uin=sender_id, name="抖音图片", content=[image_component]))
+            except Exception as e:
+                logger.error(f"处理图片 {idx} 时出错: {e}", exc_info=True)
+        
+        if len(forward_nodes) == 0:
+            yield event.plain_result("抱歉，无法加载图片。")
+            return
+        
+        # 发送合并转发消息
+        try:
+            merged_forward_message = Nodes(nodes=forward_nodes)
+            yield event.chain_result([merged_forward_message])
+            logger.info(f"成功发送 {len(forward_nodes)} 张图片（合并转发）")
+        except Exception as e:
+            logger.error(f"发送合并转发消息失败: {e}", exc_info=True)
+            yield event.plain_result(f"图片发送失败: {str(e)}")
 
     @filter.command("bili_login")
     async def handle_bili_login(self, event: AstrMessageEvent):
         """
         处理 B站 登录指令
-        通过聊天消息发送二维码给管理员，实现远程登录
+        通过聊天消息发送二维码，等待用户扫码登录。
         """
         logger.info("收到 B站登录指令")
         
