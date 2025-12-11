@@ -54,10 +54,3 @@ async def recv_all(reader, n):
             return None
         data.extend(packet)
     return data
-
-# if __name__ == "__main__":
-#     file_path = input("请输入要发送的文件路径: ")
-#     if os.path.isfile(file_path):
-#         asyncio.run(send_file(file_path, 'localhost', 3658))
-#     else:
-#         print("错误: 文件不存在")
