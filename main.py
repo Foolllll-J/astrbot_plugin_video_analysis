@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.0.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -79,8 +79,7 @@ class videoAnalysis(Star):
         # 0. 检查文件是否存在
         if not (file_path_rel and os.path.exists(file_path_rel)):
             logger.error(f"process_bili_video/douyin_video 返回成功，但文件路径无效或文件不存在: {file_path_rel}")
-            # 即使失败，也要继续到文件清理步骤
-            pass
+            message_to_send = [Plain("抱歉，由于网络或解析问题，无法获取视频文件。")]
         else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
@@ -117,7 +116,7 @@ class videoAnalysis(Star):
                         yield event.plain_result("警告：消息发送失败，请稍后重试。")
                         return
         else:
-             # 如果文件不存在，或者其他原因导致 message_to_send 为空
+            # 如果因其他原因导致 message_to_send 为空
             logger.error("未找到有效的文件或消息组件，跳过发送。")
             return
 
@@ -209,42 +208,24 @@ class videoAnalysis(Star):
                 logger.info(f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。")
                 break 
             
-            # 文件过大，需要重试降级
-            logger.warning(f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。删除文件，准备降级重试...")
-            try:
-                os.remove(file_path_rel)
-                logger.info(f"已删除超限文件: {file_path_rel}")
-            except Exception as e:
-                logger.error(f"删除超限文件失败: {e}")
-
-        # --- 步骤 3: 最终结果判断与发送 ---
-
-        file_path_rel = result.get("video_path") if result else None
-
-        is_download_successful = file_path_rel and os.path.exists(file_path_rel)
-        is_size_valid = False
-        final_size_mb = 0
-        
-        if is_download_successful:
-            final_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
-            is_size_valid = final_size_mb <= max_size
-
-        # 最终判断下载是否成功（文件必须存在且大小合规）
-        if not is_download_successful or not is_size_valid:
-            error_message = ""
-            if not is_download_successful:
-                # 下载/解析/文件创建失败
-                error_message = "抱歉，由于网络或解析问题，无法获取视频文件。"
-                logger.error("B站视频解析最终失败：下载文件不存在或路径无效。")
-            elif not is_size_valid:
-                error_message = f"该视频文件大小为 {final_size_mb:.2f}MB，超过了 {max_size}MB 的最大限制。"
-                logger.error(f"B站视频解析最终失败：文件 ({final_size_mb:.2f}MB) 仍然超出限制。")
+            # 文件过大，检查是否还能继续降级
+            next_quality = DOWNGRADE_MAP.get(current_quality)
+            can_downgrade = next_quality is not None and next_quality != current_quality and downgrade_count < MAX_QUALITY_DOWNSCALE
+            
+            if can_downgrade:
+                # 还能降级，删除文件准备重试
+                logger.warning(f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。删除文件，准备降级重试...")
+                try:
+                    os.remove(file_path_rel)
+                    logger.info(f"已删除超限文件: {file_path_rel}")
+                except Exception as e:
+                    logger.error(f"删除超限文件失败: {e}")
             else:
-                error_message = "抱歉，视频处理过程中出现未知错误。"
+                # 无法继续降级，保留文件让后续统一处理
+                logger.warning(f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。已达降级上限，保留文件交由后续处理。")
+                break
 
-            yield event.plain_result(error_message)
-
-        # 文件下载成功且大小合规，进行发送
+        # --- 步骤 3: 统一处理和发送 ---
         async for response in self._process_and_send(event, result, 'bili'):
             yield response
 

@@ -1,13 +1,13 @@
 {
     "nap_server_address": {
         "description": "Napcat服务地址",
-        "hint": "若与服务器在同一服务器上可保持默认。",
+        "hint": "若与服务器在同一服务器上请保持默认。",
         "type": "string",
         "default": "localhost"
     },
     "nap_server_port": {
         "description": "Napcat所处服务器接收文件端口",
-        "hint": "若与服务器在同一服务器上可保持默认。",
+        "hint": "若与服务器在同一服务器上请保持默认。",
         "type": "int",
         "default": 3658
     },

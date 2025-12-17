@@ -1,8 +1,8 @@
-# 视频解析助手
+# 🎬 视频解析助手
 
-![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
-![AstrBot](https://img.shields.io/badge/framework-AstrBot-orange)
+![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
+![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
+![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
 
 一个为 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
 
