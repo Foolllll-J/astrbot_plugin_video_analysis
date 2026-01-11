@@ -240,7 +240,7 @@ class videoAnalysis(Star):
 
         for attempt in range(MAX_PROCESS_RETRIES + 1):
             try:
-                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1}")
+                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
                 
                 result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie) 
                 
@@ -250,8 +250,13 @@ class videoAnalysis(Star):
                 
                 # 检查是否是多媒体类型（图片或多视频）
                 if result.get("type") in ["image", "images", "multi_video"]:
-                    if result.get("image_paths") or result.get("video_paths"):
-                        logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
+                    has_media = (
+                        result.get("image_paths") or 
+                        result.get("video_paths") or 
+                        result.get("ordered_media")
+                    )
+                    if has_media:
+                        logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('ordered_media', []) or result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
                         break
                 
                 # 检查文件是否存在（单视频）

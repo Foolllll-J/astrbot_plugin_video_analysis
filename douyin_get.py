@@ -138,7 +138,6 @@ async def process_douyin_video_local(url: str, download_dir: str, cookie: str):
         logger.error(f"[ERROR] Douyin 本地解析返回错误: {data.get('error') if data else 'Unknown'}")
         return None
         
-    media_items = data.get("media_urls", []) 
     title = data.get("desc", "抖音作品")
     author = data.get("author_nickname", "N/A")
     aweme_id = data.get("aweme_id", hashlib.md5(url.encode()).hexdigest())

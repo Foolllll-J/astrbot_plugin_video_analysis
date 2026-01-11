@@ -4,13 +4,13 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
 
-一款 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
+一款 [AstrBot](https://astrbot.app) 设计的视频平台（如 BiliBili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
 
 ---
 
 ### ✨ 功能
 
-- **多平台支持**：支持 Bilibili (B站) 和 Douyin (抖音) 短链接的自动解析。
+- **多平台支持**：支持 BiliBili (B站) 和 Douyin (抖音) 短链接的自动解析。
 - **高性能下载**：调用 **`yutto`** 命令行工具，实现高并发下载和自动 FFmpeg 合并。
 - **清晰度智能降级**：可根据设置的最大视频大小来动态调整解析长视频时使用的清晰度。
 - **资源管理**：异步清理超过设定阈值的临时文件，防止占用磁盘空间。
