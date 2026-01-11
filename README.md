@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
 
-一个为 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
+一款 [AstrBot](https://astrbot.app) 设计的视频平台（如 Bilibili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
 
 ---
 
@@ -50,8 +50,12 @@ pipx install yutto
 3. 将整个 `astrbot_plugin_video_analysis` 文件夹放入 `astrbot` 的 `plugins` 目录中。
 4. 重启 AstrBot。
 
+---
+
 ### 📝 版本记录
 
+* **v1.1**
+  * 新增 **抖音本地解析** 功能，支持动图获取
 * **v1.0**
   * 新增 **抖音图片作品** 的解析，自动以合并转发形式发送图片
   * 新增 `/bili_login` 和 `/bili_check` 指令
@@ -65,7 +69,7 @@ pipx install yutto
 
 本项目在开发过程中，参考并得益于以下项目，特此感谢：
 
-- **原始代码参考**：[AstrBot 视频解析插件](https://github.com/miaoxutao123/astrbot_plugin_videos_analysis)
+- **原始代码参考&抖音本地解析**：[视频解析插件](https://github.com/miaoxutao123/astrbot_plugin_videos_analysis)
 - **B站解析核心**：[yutto](https://github.com/yutto-dev/yutto)
 - **抖音解析服务**：[抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
 

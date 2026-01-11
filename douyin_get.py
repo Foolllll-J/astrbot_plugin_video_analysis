@@ -7,6 +7,7 @@ import os
 import json
 import hashlib
 from astrbot.api import logger
+from .douyin_scraper.douyin_parser import DouyinParser
 
 class ParseError(Exception):
     """自定义解析错误"""
@@ -83,29 +84,127 @@ class DYResult:
 
         raise Exception("无法解析内容类型或视频数据缺失")
 
-async def process_douyin_video(url: str, download_dir: str, api_url: str):
+async def process_douyin_video(url: str, download_dir: str, api_url: str = None, cookie: str = None):
     """
-    使用外部 API 获取抖音视频/图片直链，并下载到本地。
-    先尝试 hybrid/video_data API，失败后尝试 download API。
+    获取抖音视频/图片。
+    逻辑：
+    1. 如果有 cookie，优先尝试本地解析。
+    2. 如果本地解析失败或没有 cookie，且有 api_url，则尝试 API 解析。
+    3. 如果都失败或都未提供，返回 None。
     
     Args:
         url (str): 抖音分享链接。
         download_dir (str): 文件下载目录。
         api_url (str): 外部解析服务的地址。
+        cookie (str): 抖音 Cookie。
     
     Returns:
         dict: 包含视频/图片信息和下载路径，或 None
     """
     
-    # 先尝试原有的 video_data API
-    result = await _try_video_data_api(url, download_dir, api_url)
-    if result is not None:
-        return result
+    # 1. 优先尝试本地解析 (如果有 Cookie)
+    if cookie:
+        logger.info("[INFO] Douyin: 尝试本地解析 (使用 Cookie)")
+        try:
+            result = await process_douyin_video_local(url, download_dir, cookie)
+            if result:
+                return result
+        except Exception as e:
+            logger.error(f"[ERROR] Douyin 本地解析失败: {e}")
+            # 继续尝试 API
     
-    # 如果失败，尝试新的 download API
-    logger.info("[INFO] Douyin: 尝试 download API")
-    result = await _try_download_api(url, download_dir, api_url)
-    return result
+    # 2. 尝试 API 解析
+    if api_url:
+        logger.info("[INFO] Douyin: 尝试 API 解析")
+        # 先尝试原有的 video_data API
+        result = await _try_video_data_api(url, download_dir, api_url)
+        if result is not None:
+            return result
+        
+        # 如果失败，尝试新的 download API
+        logger.info("[INFO] Douyin: 尝试 download API")
+        result = await _try_download_api(url, download_dir, api_url)
+        if result is not None:
+            return result
+            
+    return None
+
+async def process_douyin_video_local(url: str, download_dir: str, cookie: str):
+    """使用本地解析逻辑"""
+    parser = DouyinParser(cookie)
+    data = await parser.parse(url)
+    
+    if not data or "error" in data:
+        logger.error(f"[ERROR] Douyin 本地解析返回错误: {data.get('error') if data else 'Unknown'}")
+        return None
+        
+    media_items = data.get("media_urls", []) 
+    title = data.get("desc", "抖音作品")
+    author = data.get("author_nickname", "N/A")
+    aweme_id = data.get("aweme_id", hashlib.md5(url.encode()).hexdigest())
+    
+    os.makedirs(download_dir, exist_ok=True)
+    
+    media_items = []
+    
+    for i, item in enumerate(data.get("media_urls", [])):
+        m_url = item["url"]
+        m_type = item["type"]
+        
+        if m_type == "video":
+            v_file = os.path.join(download_dir, f"{aweme_id}_{i}.mp4")
+            if os.path.exists(v_file) or await _download_file(m_url, v_file):
+                media_items.append({"path": v_file, "type": "video"})
+        else: # image
+            file_ext = ".jpg"
+            if ".png" in m_url.lower(): file_ext = ".png"
+            elif ".webp" in m_url.lower(): file_ext = ".webp"
+            elif ".gif" in m_url.lower(): file_ext = ".gif"
+            
+            img_file = os.path.join(download_dir, f"{aweme_id}_{i}{file_ext}")
+            if os.path.exists(img_file) or await _download_file(m_url, img_file):
+                media_items.append({"path": img_file, "type": "image"})
+
+    if not media_items:
+        return None
+        
+    # 如果只有一个媒体
+    if len(media_items) == 1:
+        item = media_items[0]
+        if item["type"] == "video":
+            return {
+                "title": title, "author": author, "url": url,
+                "video_path": item["path"], "type": "video"
+            }
+        else:
+            return {
+                "title": title, "author": author, "url": url,
+                "image_paths": [item["path"]], "type": "image"
+            }
+            
+    # 多个媒体，保持原始顺序
+    return {
+        "title": title, "author": author, "url": url,
+        "ordered_media": media_items,
+        "type": "multi_video" if any(i["type"] == "video" for i in media_items) else "images"
+    }
+
+async def _download_file(url: str, save_path: str) -> bool:
+    """通用下载函数"""
+    try:
+        async with httpx.AsyncClient(timeout=300, verify=False) as client: 
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 'Referer': 'https://www.douyin.com/'}
+            async with client.stream('GET', url, headers=headers, follow_redirects=True) as response: 
+                response.raise_for_status()
+                async with aiofiles.open(save_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        await f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] 文件下载失败: {url}, 错误: {e}")
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        return False
 
 async def _try_video_data_api(url: str, download_dir: str, api_url: str):
     """尝试使用 video_data API 解析"""

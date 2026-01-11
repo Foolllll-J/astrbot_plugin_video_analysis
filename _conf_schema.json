@@ -47,9 +47,15 @@
         "type": "bool",
         "default": true
     },
+    "douyin_cookie": {
+        "description": "抖音 Cookie",
+        "hint": "选填，用于本地解析抖音视频。",
+        "type": "string",
+        "default": null
+    },
     "douyin_api_url": {
         "description": "抖音/TikTok 外部解析 API 地址",
-        "hint": "未填写则禁用抖音解析。",
+        "hint": "选填。若填写了 Cookie 则作为本地解析失败后的兜底；若未填 Cookie 则作为唯一解析方案；若均未填则禁用抖音解析。",
         "type": "string",
         "default": null
     }
