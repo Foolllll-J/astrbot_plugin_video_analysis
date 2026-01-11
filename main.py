@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.0.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -38,6 +38,7 @@ class videoAnalysis(Star):
         self.bili_quality = config.get("bili_quality", 32)
         self.bili_use_login = config.get("bili_use_login", False)
         self.bili_smart_downgrade = config.get("bili_smart_downgrade", True) # 【加载新增配置】
+        self.douyin_cookie = config.get("douyin_cookie", None)
         self.douyin_api_url = config.get("douyin_api_url", None)
         
         # 设置数据目录
@@ -239,20 +240,26 @@ class videoAnalysis(Star):
 
         for attempt in range(MAX_PROCESS_RETRIES + 1):
             try:
-                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1}")
+                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
                 
-                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url) 
+                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie) 
                 
                 if not result:
                     if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
                     else: logger.error("process_douyin_video 连续返回空值，最终失败.")
                 
-                # 检查是否是图片类型
-                if result.get("type") in ["image", "images"] and result.get("image_paths"):
-                    logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result['image_paths'])} 张图片。")
-                    break
+                # 检查是否是多媒体类型（图片或多视频）
+                if result.get("type") in ["image", "images", "multi_video"]:
+                    has_media = (
+                        result.get("image_paths") or 
+                        result.get("video_paths") or 
+                        result.get("ordered_media")
+                    )
+                    if has_media:
+                        logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('ordered_media', []) or result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
+                        break
                 
-                # 检查文件是否存在（视频）
+                # 检查文件是否存在（单视频）
                 if result and result.get("video_path") and os.path.exists(result["video_path"]):
                     logger.info(f"第 {attempt + 1} 次尝试成功，文件已找到。")
                     break 
@@ -265,64 +272,98 @@ class videoAnalysis(Star):
             if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败.")
             await asyncio.sleep(2)
         
-        # 处理图片类型
-        if result and result.get("type") in ["image", "images"] and result.get("image_paths"):
-            async for response in self._send_douyin_images(event, result):
+        # 处理多媒体类型
+        if result and (result.get("type") in ["image", "images", "multi_video"]):
+            async for response in self._send_douyin_multimedia(event, result):
                 yield response
-            
-            # 清理文件
-            download_dir_douyin = os.path.join(self.download_dir, "douyin")
-            await async_delete_old_files(download_dir_douyin, self.delete_time)
-            return
         
-        # 处理视频类型
-        if not result or not result.get("video_path") or not os.path.exists(result["video_path"]):
-            yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
-            download_dir_douyin = os.path.join(self.download_dir, "douyin")
-            await async_delete_old_files(download_dir_douyin, self.delete_time)
-            return
+        # 处理单视频类型
+        elif result and result.get("video_path") and os.path.exists(result["video_path"]):
+            async for response in self._process_and_send(event, result, 'douyin'):
+                yield response
 
-        async for response in self._process_and_send(event, result, 'douyin'):
-            yield response
+        # 处理失败情况
+        else:
+            yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
+
+        # 统一清理文件
+        download_dir_douyin = os.path.join(self.download_dir, "douyin")
+        await async_delete_old_files(download_dir_douyin, self.delete_time)
     
-    async def _send_douyin_images(self, event: AstrMessageEvent, result: dict):
-        """发送抖音图片（使用合并转发）"""
-        image_paths = result.get("image_paths", [])
+    async def _send_douyin_multimedia(self, event: AstrMessageEvent, result: dict):
+        """发送抖音多媒体（单个直接发送，多个使用合并转发，保持原始顺序）"""
+        ordered_media = result.get("ordered_media", [])
         
-        if not image_paths:
-            logger.error("没有找到图片文件")
-            yield event.plain_result("抱歉，没有找到图片文件。")
+        # 兼容旧版本或 API 返回的格式
+        if not ordered_media:
+            image_paths = result.get("image_paths", [])
+            video_paths = result.get("video_paths", [])
+            for p in image_paths: ordered_media.append({"path": p, "type": "image"})
+            for p in video_paths: ordered_media.append({"path": p, "type": "video"})
+        
+        if not ordered_media:
+            logger.error("没有找到媒体文件")
+            yield event.plain_result("抱歉，没有找到媒体文件。")
             return
         
-        logger.info(f"准备发送 {len(image_paths)} 张图片")
+        # --- 优化：单个媒体直接发送 ---
+        if len(ordered_media) == 1:
+            item = ordered_media[0]
+            media_path = item["path"]
+            if not os.path.exists(media_path):
+                yield event.plain_result("抱歉，媒体文件不存在。")
+                return
+            
+            try:
+                nap_file_path = await self._send_file_if_needed(media_path)
+                if item["type"] == "image":
+                    yield event.chain_result([Image.fromFileSystem(path=nap_file_path)])
+                else:
+                    yield event.chain_result([Comp.Video.fromFileSystem(path=nap_file_path)])
+                logger.info(f"成功直接发送单个媒体文件: {media_path}")
+                return
+            except Exception as e:
+                logger.error(f"直接发送单个媒体失败: {e}", exc_info=True)
+                yield event.plain_result(f"发送失败: {str(e)}")
+                return
+
+        # --- 多个媒体使用合并转发 ---
+        logger.info(f"准备发送 {len(ordered_media)} 个媒体文件（保持顺序，合并转发）")
         
         sender_id = event.get_self_id()
         forward_nodes = []
         
-        for idx, image_path in enumerate(image_paths, 1):
-            if not os.path.exists(image_path):
-                logger.warning(f"图片文件不存在: {image_path}")
+        for idx, item in enumerate(ordered_media, 1):
+            media_path = item["path"]
+            media_type = item["type"]
+            
+            if not os.path.exists(media_path):
+                logger.warning(f"文件不存在: {media_path}")
                 continue
             
             try:
-                nap_file_path = await self._send_file_if_needed(image_path)
-                image_component = Image.fromFileSystem(path=nap_file_path)
-                forward_nodes.append(Node(uin=sender_id, name="抖音图片", content=[image_component]))
+                nap_file_path = await self._send_file_if_needed(media_path)
+                if media_type == "image":
+                    component = Image.fromFileSystem(path=nap_file_path)
+                else:
+                    component = Comp.Video.fromFileSystem(path=nap_file_path)
+                
+                forward_nodes.append(Node(uin=sender_id, name="抖音内容", content=[component]))
             except Exception as e:
-                logger.error(f"处理图片 {idx} 时出错: {e}", exc_info=True)
+                logger.error(f"处理第 {idx} 个媒体 ({media_type}) 时出错: {e}", exc_info=True)
         
         if len(forward_nodes) == 0:
-            yield event.plain_result("抱歉，无法加载图片。")
+            yield event.plain_result("抱歉，无法加载媒体文件。")
             return
         
         # 发送合并转发消息
         try:
             merged_forward_message = Nodes(nodes=forward_nodes)
             yield event.chain_result([merged_forward_message])
-            logger.info(f"成功发送 {len(forward_nodes)} 张图片（合并转发）")
+            logger.info(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
         except Exception as e:
             logger.error(f"发送合并转发消息失败: {e}", exc_info=True)
-            yield event.plain_result(f"图片发送失败: {str(e)}")
+            yield event.plain_result(f"内容发送失败: {str(e)}")
 
     @filter.command("bili_login")
     async def handle_bili_login(self, event: AstrMessageEvent):
@@ -434,9 +475,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
 
     if match_douyin:
-        # 检查是否配置了 API 地址
-        if not self.douyin_api_url:
-            logger.warning("成功匹配到抖音链接，但 douyin_api_url 未配置，跳过解析。")
+        # 检查是否配置了 API 地址或 Cookie
+        if not self.douyin_api_url and not self.douyin_cookie:
+            logger.warning("成功匹配到抖音链接，但 douyin_api_url 和 douyin_cookie 均未配置，跳过解析。")
             return
             
         url = match_douyin.group(1)
