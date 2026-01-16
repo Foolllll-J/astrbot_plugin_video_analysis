@@ -1,14 +1,20 @@
+<div align="center">
+
 # 🎬 视频解析助手
 
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
 
-一款 [AstrBot](https://astrbot.app) 设计的视频平台（如 BiliBili 和抖音）分享链接解析插件。通过采用 **yutto** 等工具，稳定、快速地解析视频链接并发送视频给用户。
+</div>
+
+## 🧾 简介
+
+一款为 [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 设计的视频平台分享链接解析插件，支持自动识别并解析 B站、抖音分享链接，智能处理视频与图片发送。
 
 ---
 
-### ✨ 功能
+## ✨ 功能
 
 - **多平台支持**：支持 BiliBili (B站) 和 Douyin (抖音) 短链接的自动解析。
 - **高性能下载**：调用 **`yutto`** 命令行工具，实现高并发下载和自动 FFmpeg 合并。
@@ -18,14 +24,14 @@
 
 ---
 
-### 🎮 指令列表
+## 🎮 指令列表
 
 - **`/bili_login`** - 触发 B站账号登录流程，接收二维码图片进行扫码登录
 - **`/bili_check`** - 检查当前 B站 Cookie 是否有效
 
 ---
 
-### ⚙️ 安装
+## ⚙️ 安装
 
 1. 由于插件依赖于外部命令行工具，请确保您的 Docker 容器内已安装它们：
 
@@ -52,7 +58,10 @@ pipx install yutto
 
 ---
 
-### 📝 版本记录
+## 📅 更新日志
+
+<details>
+<summary>点击展开更新日志</summary>
 
 * **v1.1**
   * 新增 **抖音本地解析** 功能，支持动图获取
@@ -65,6 +74,10 @@ pipx install yutto
 * **v0.1**
   * 实现 **BiliBili** 视频分享链接的识别和解析。
 
+</details>
+
+---
+
 ### 🙏 致谢与参考
 
 本项目在开发过程中，参考并得益于以下项目，特此感谢：
@@ -73,3 +86,17 @@ pipx install yutto
 - **B站解析核心**：[yutto](https://github.com/yutto-dev/yutto)
 - **抖音解析服务**：[抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
 
+---
+
+## ❤️ 支持
+
+- [AstrBot 帮助文档](https://astrbot.app)
+- 如果您在使用中遇到问题，欢迎在本仓库提交 [Issue](https://github.com/Foolllll-J/astrbot_plugin_video_analysis/issues)。
+
+---
+
+<div align="center">
+
+**如果本插件对你有帮助，欢迎点个 ⭐ Star 支持一下！**
+
+</div>
