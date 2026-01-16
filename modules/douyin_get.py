@@ -7,7 +7,7 @@ import os
 import json
 import hashlib
 from astrbot.api import logger
-from .douyin_scraper.douyin_parser import DouyinParser
+from ..douyin_scraper.douyin_parser import DouyinParser
 
 class ParseError(Exception):
     """自定义解析错误"""
