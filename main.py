@@ -9,13 +9,13 @@ import re
 import os
 import asyncio
 
-from .file_send_server import send_file
-from .bili_get import (
+from .modules.file_send_server import send_file
+from .modules.bili_get import (
     process_bili_video, REG_B23, REG_BV, REG_AV, av2bv, parse_b23, parse_video,
     estimate_size, init_bili_module, bili_login, check_cookie_valid
 )
-from .douyin_get import process_douyin_video 
-from .auto_delete import delete_old_files
+from .modules.douyin_get import process_douyin_video 
+from .modules.auto_delete import delete_old_files
 
 MAX_PROCESS_RETRIES = 0
 MAX_SEND_RETRIES = 2
