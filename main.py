@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.1.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.1.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -438,7 +438,7 @@ class videoAnalysis(Star):
 @filter.event_message_type(EventMessageType.ALL)
 async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *args, **kwargs):
     """
-    【架构总控】自动检测消息中是否包含分享链接，并分发给相应的处理器。
+    自动检测消息中是否包含分享链接，并分发给相应的处理器。
     """
     group_id = event.get_group_id()
     if group_id:
@@ -459,11 +459,16 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
 
     # --- 1. 检查 Bilibili 链接 ---
     match_bili = re.search(r"(https?://b23\.tv/[\w]+|https?://bili2233\.cn/[\w]+|BV1\w{9}|av\d+)", message_str)
-    match_bili_json = re.search(r"https:\\\\/\\\\/b23\.tv\\\\/[a-zA-Z0-9]+", message_obj_str)
+    match_bili_json = re.search(r"https?://(?:b23\.tv|bili2233\.cn)/[a-zA-Z0-9]+", message_obj_str)
+    if not match_bili_json:
+        match_bili_json = re.search(r"https:\\\\/\\\\/(?:b23\.tv|bili2233\.cn)\\\\/[a-zA-Z0-9]+", message_obj_str)
     
     if match_bili or match_bili_json:
-        # 获取 B站 URL
-        url = match_bili.group(1) if match_bili else match_bili_json.group(0).replace("\\\\", "\\").replace("\\/", "/")
+        if match_bili:
+            url = match_bili.group(1)
+        else:
+            raw = match_bili_json.group(0)
+            url = raw.replace("\\\\", "\\").replace("\\/", "/")
             
         # 调用 Bilibili 处理函数
         async for response in self._handle_bili_parsing(event, url):
