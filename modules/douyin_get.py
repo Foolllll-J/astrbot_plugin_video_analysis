@@ -84,7 +84,7 @@ class DYResult:
 
         raise Exception("无法解析内容类型或视频数据缺失")
 
-async def process_douyin_video(url: str, download_dir: str, api_url: str = None, cookie: str = None):
+async def process_douyin_video(url: str, download_dir: str, api_url: str = None, cookie: str = None, max_images: int = 20):
     """
     获取抖音视频/图片。
     逻辑：
@@ -97,6 +97,7 @@ async def process_douyin_video(url: str, download_dir: str, api_url: str = None,
         download_dir (str): 文件下载目录。
         api_url (str): 外部解析服务的地址。
         cookie (str): 抖音 Cookie。
+        max_images (int): 图文作品解析上限。
     
     Returns:
         dict: 包含视频/图片信息和下载路径，或 None
@@ -106,7 +107,7 @@ async def process_douyin_video(url: str, download_dir: str, api_url: str = None,
     if cookie:
         logger.info("[INFO] Douyin: 尝试本地解析 (使用 Cookie)")
         try:
-            result = await process_douyin_video_local(url, download_dir, cookie)
+            result = await process_douyin_video_local(url, download_dir, cookie, max_images)
             if result:
                 return result
         except Exception as e:
@@ -123,13 +124,13 @@ async def process_douyin_video(url: str, download_dir: str, api_url: str = None,
         
         # 如果失败，尝试新的 download API
         logger.info("[INFO] Douyin: 尝试 download API")
-        result = await _try_download_api(url, download_dir, api_url)
+        result = await _try_download_api(url, download_dir, api_url, max_images)
         if result is not None:
             return result
             
     return None
 
-async def process_douyin_video_local(url: str, download_dir: str, cookie: str):
+async def process_douyin_video_local(url: str, download_dir: str, cookie: str, max_images: int = 20):
     """使用本地解析逻辑"""
     parser = DouyinParser(cookie)
     data = await parser.parse(url)
@@ -155,6 +156,10 @@ async def process_douyin_video_local(url: str, download_dir: str, cookie: str):
             if os.path.exists(v_file) or await _download_file(m_url, v_file):
                 media_items.append({"path": v_file, "type": "video"})
         else: # image
+            if len([m for m in media_items if m["type"] == "image"]) >= max_images:
+                logger.info(f"[INFO] Douyin 本地解析: 图片数量达到上限 {max_images}，跳过后续图片。")
+                continue
+
             file_ext = ".jpg"
             if ".png" in m_url.lower(): file_ext = ".png"
             elif ".webp" in m_url.lower(): file_ext = ".webp"
@@ -292,7 +297,7 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
             os.remove(final_file)
         return None
 
-async def _try_download_api(url: str, download_dir: str, api_url: str):
+async def _try_download_api(url: str, download_dir: str, api_url: str, max_images: int = 20):
     """尝试使用 download API 下载"""
     logger.info(f"[INFO] Douyin: 开始使用 download API 解析")
     
@@ -397,7 +402,12 @@ async def _try_download_api(url: str, download_dir: str, api_url: str):
                 for root, dirs, files in os.walk(extract_dir):
                     for file in files:
                         if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                            if len(image_files) >= max_images:
+                                logger.info(f"[INFO] Douyin API 解析: 图片数量达到上限 {max_images}，忽略其余提取的图片。")
+                                break
                             image_files.append(os.path.join(root, file))
+                    if len(image_files) >= max_images:
+                        break
                 
                 logger.info(f"[INFO] 从ZIP中提取了 {len(image_files)} 张图片")
                 

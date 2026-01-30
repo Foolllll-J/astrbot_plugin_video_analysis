@@ -2,6 +2,8 @@
 
 # 🎬 视频解析助手
 
+<i>🔮 B站抖音解析的最优方案</i>
+
 ![License](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)
 ![Python](https://img.shields.io/badge/python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
 ![AstrBot](https://img.shields.io/badge/framework-AstrBot-ff6b6b?style=flat-square)
@@ -21,6 +23,7 @@
 - **清晰度智能降级**：可根据设置的最大视频大小来动态调整解析长视频时使用的清晰度。
 - **资源管理**：异步清理超过设定阈值的临时文件，防止占用磁盘空间。
 - **便捷登录**：支持通过指令发送登录二维码，可直接扫码登录 B站账号。
+- **表情回应**：通过贴表情实时反馈解析状态，支持自定义开启/关闭表情互动。
 
 ---
 
@@ -63,6 +66,9 @@ pipx install yutto
 <details>
 <summary>点击展开更新日志</summary>
 
+* **v1.2**
+  * 新增 **表情回应**
+  * 新增 抖音图文解析上限
 * **v1.1**
   * 新增 **抖音本地解析** 功能，支持动图获取
 * **v1.0**

@@ -18,16 +18,28 @@
         "default": []
     },
     "delete_time":{
-        "description": "删除文件时间（单位分钟）",
+        "description": "删除文件时间（分钟）",
         "hint": "视频文件保存的时间，超过此时间将被自动删除。",
         "type": "int",
         "default": 60
     },
     "max_video_size":{
-        "description": "最大视频大小（单位MB）",
+        "description": "最大视频大小（MB）",
         "hint": "视频文件的最大允许大小，超过此限制将无法发送。",
         "type": "int",
         "default": 100
+    },
+    "enable_emoji_reaction": {
+        "description": "解析时贴表情",
+        "hint": "开启后，将在开始解析、解析成功、解析失败时对原消息进行表情回应。",
+        "type": "bool",
+        "default": true
+    },
+    "bili_use_login": {
+        "description": "使用登录状态下载B站视频",
+        "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式。",
+        "type": "bool",
+        "default": false
     },
     "bili_quality":{
         "description": "B站视频清晰度",
@@ -35,14 +47,8 @@
         "type": "int",
         "default": 64
     },
-    "bili_use_login": {
-          "description": "是否使用登录状态下载B站视频",
-          "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式。",
-          "type": "bool",
-          "default": false
-    },
     "bili_smart_downgrade":{
-        "description": "是否根据时长和文件大小限制自动降级B站视频清晰度",
+        "description": "B站视频清晰度智能降级",
         "hint" :"开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制。",
         "type": "bool",
         "default": true
@@ -54,9 +60,20 @@
         "default": null
     },
     "douyin_api_url": {
-        "description": "抖音/TikTok 外部解析 API 地址",
+        "description": "抖音解析 API 地址",
         "hint": "选填。若填写了 Cookie 则作为本地解析失败后的兜底；若未填 Cookie 则作为唯一解析方案；若均未填则禁用抖音解析。",
         "type": "string",
-        "default": null
+        "default": ""
+    },
+    "douyin_max_images": {
+        "description": "抖音图文作品解析上限",
+        "hint": "设置抖音图文作品解析的最大图片数量，超过此上限的图片将被忽略。",
+        "type": "int",
+        "slider": {
+            "min": 1,
+            "max": 99,
+            "step": 1
+        },
+        "default": 20
     }
 }

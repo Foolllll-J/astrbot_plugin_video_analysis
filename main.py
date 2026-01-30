@@ -37,9 +37,11 @@ class videoAnalysis(Star):
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = config.get("bili_quality", 32)
         self.bili_use_login = config.get("bili_use_login", False)
-        self.bili_smart_downgrade = config.get("bili_smart_downgrade", True) # 【加载新增配置】
+        self.bili_smart_downgrade = config.get("bili_smart_downgrade", True)
         self.douyin_cookie = config.get("douyin_cookie", None)
         self.douyin_api_url = config.get("douyin_api_url", None)
+        self.douyin_max_images = config.get("douyin_max_images", 20)
+        self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
         
         # 设置数据目录
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
@@ -66,6 +68,19 @@ class videoAnalysis(Star):
             name="astrbot",
             content=content
         )
+
+    async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int, set_val: bool = True):
+        """Helper function to set/unset emoji reaction if enabled"""
+        if not self.enable_emoji_reaction:
+            return
+        try:
+            await event.bot.set_msg_emoji_like(
+                message_id=event.message_obj.message_id,
+                emoji_id=emoji_id,
+                set=set_val,
+            )
+        except Exception as e:
+            logger.warning(f"{'设置' if set_val else '取消'}表情回应失败 (emoji_id: {emoji_id}): {e}")
         
     async def _process_and_send(self, event: AstrMessageEvent, result: dict, platform: str):
         """
@@ -81,6 +96,8 @@ class videoAnalysis(Star):
         if not (file_path_rel and os.path.exists(file_path_rel)):
             logger.error(f"process_bili_video/douyin_video 返回成功，但文件路径无效或文件不存在: {file_path_rel}")
             message_to_send = [Plain("抱歉，由于网络或解析问题，无法获取视频文件。")]
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
         else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
@@ -90,6 +107,8 @@ class videoAnalysis(Star):
                 # 视频过大，不发送视频，只回复文本消息
                 message_to_send = [Plain(f"抱歉，该视频文件大小为 {file_size_mb:.2f}MB，超过了 {self.max_video_size}MB 的最大限制，无法发送视频消息。")]
                 logger.warning(f"视频大小超出限制，将回复文本消息。")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 357)
             else:
                 # 视频在限制内，构建视频组件
                 nap_file_path = await self._send_file_if_needed(file_path_rel) 
@@ -97,6 +116,8 @@ class videoAnalysis(Star):
                 media_component = Comp.Video.fromFileSystem(path = nap_file_path)
                 message_to_send = [media_component]
                 logger.info(f"视频在大小限制内，构建 Video 组件。")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 124)
 
         
         # 2. 发送逻辑
@@ -115,10 +136,14 @@ class videoAnalysis(Star):
                         logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
                         # 如果是发送文本失败，回复警告文本
                         yield event.plain_result("警告：消息发送失败，请稍后重试。")
+                        await self._set_emoji(event, 424, False)
+                        await self._set_emoji(event, 357)
                         return
         else:
             # 如果因其他原因导致 message_to_send 为空
-            logger.error("未找到有效的文件或消息组件，跳过发送。")
+            logger.error("未找到有效的文件 or 消息组件，跳过发送。")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
             return
 
         # 4. 文件清理
@@ -158,6 +183,8 @@ class videoAnalysis(Star):
 
         if not video_info:
             yield event.plain_result("抱歉，无法解析视频信息，无法进行下载。请稍后重试。")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
             return
             
         duration = video_info.get("duration", 0)
@@ -242,7 +269,7 @@ class videoAnalysis(Star):
             try:
                 logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
                 
-                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie) 
+                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie, max_images=self.douyin_max_images) 
                 
                 if not result:
                     if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
@@ -285,6 +312,8 @@ class videoAnalysis(Star):
         # 处理失败情况
         else:
             yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
 
         # 统一清理文件
         download_dir_douyin = os.path.join(self.download_dir, "douyin")
@@ -304,6 +333,8 @@ class videoAnalysis(Star):
         if not ordered_media:
             logger.error("没有找到媒体文件")
             yield event.plain_result("抱歉，没有找到媒体文件。")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
             return
         
         # --- 优化：单个媒体直接发送 ---
@@ -312,6 +343,8 @@ class videoAnalysis(Star):
             media_path = item["path"]
             if not os.path.exists(media_path):
                 yield event.plain_result("抱歉，媒体文件不存在。")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 357)
                 return
             
             try:
@@ -321,10 +354,14 @@ class videoAnalysis(Star):
                 else:
                     yield event.chain_result([Comp.Video.fromFileSystem(path=nap_file_path)])
                 logger.info(f"成功直接发送单个媒体文件: {media_path}")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 124)
                 return
             except Exception as e:
                 logger.error(f"直接发送单个媒体失败: {e}", exc_info=True)
                 yield event.plain_result(f"发送失败: {str(e)}")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 357)
                 return
 
         # --- 多个媒体使用合并转发 ---
@@ -354,6 +391,8 @@ class videoAnalysis(Star):
         
         if len(forward_nodes) == 0:
             yield event.plain_result("抱歉，无法加载媒体文件。")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
             return
         
         # 发送合并转发消息
@@ -361,9 +400,13 @@ class videoAnalysis(Star):
             merged_forward_message = Nodes(nodes=forward_nodes)
             yield event.chain_result([merged_forward_message])
             logger.info(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 124)
         except Exception as e:
             logger.error(f"发送合并转发消息失败: {e}", exc_info=True)
             yield event.plain_result(f"内容发送失败: {str(e)}")
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
 
     @filter.command("bili_login")
     async def handle_bili_login(self, event: AstrMessageEvent):
@@ -470,6 +513,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             raw = match_bili_json.group(0)
             url = raw.replace("\\\\", "\\").replace("\\/", "/")
             
+        # 触发开始解析表情回应
+        await self._set_emoji(event, 424)
+
         # 调用 Bilibili 处理函数
         async for response in self._handle_bili_parsing(event, url):
             yield response
@@ -488,6 +534,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         url = match_douyin.group(1)
         logger.info(f"成功匹配到抖音短链接：{url}")
         
+        # 触发开始解析表情回应
+        await self._set_emoji(event, 424)
+
         # 调用抖音处理函数
         async for response in self._handle_douyin_parsing(event, url):
             yield response
