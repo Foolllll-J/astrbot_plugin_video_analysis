@@ -102,7 +102,7 @@ def av2bv(av):
 async def bili_request(url, return_json=True):
     """发送B站API请求"""
     if not url or not isinstance(url, str): return {"code": -400, "message": "Invalid URL"}
-    headers = {"referer": "https://www.bilibili.com/", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"}
+    headers = {"referer": "https://www.bilibili.com/", "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36", "Accept-Encoding": "gzip, deflate"}
     try:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -133,7 +133,7 @@ async def check_cookie_valid():
             logger.debug(f"Cookie字段验证失败: {field} = {cookies.get(field)}")
             return False
     url = "https://api.bilibili.com/x/member/web/account"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://space.bilibili.com/", "Origin": "https://space.bilibili.com", "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Referer": "https://space.bilibili.com/", "Origin": "https://space.bilibili.com", "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()]), "Accept-Encoding": "gzip, deflate"}
     try:
         async with aiohttp.ClientSession() as session:
             timeout = aiohttp.ClientTimeout(total=10)
@@ -228,7 +228,7 @@ async def generate_qrcode():
 async def check_login_status(qrcode_key):
     """检查登录状态"""
     url = f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36", "Accept-Encoding": "gzip, deflate"}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as response:
