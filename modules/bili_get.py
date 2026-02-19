@@ -395,8 +395,13 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         return output_path
     else:
         logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
-        logger.info(f"yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
-        raise Exception("yutto 运行成功但未能生成最终文件，可能是文件名或路径设置问题。")
+        stdout_str = stdout_data.decode(errors='ignore').strip()
+        logger.info(f"yutto 标准输出: {stdout_str[:500]}...")
+        
+        if "尚不支持 DASH 格式" in stdout_str:
+             raise Exception("该视频尚不支持 DASH 格式。")
+        
+        raise Exception(f"yutto 运行成功但未能生成最终文件。Stdout: {stdout_str[:100]}")
 
 async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8):
     """
@@ -470,8 +475,13 @@ async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_work
         return output_path
     else:
         logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
-        logger.info(f"yutto 标准输出: {stdout_data.decode(errors='ignore').strip()[:500]}...")
-        raise Exception("yutto 运行成功但未能生成最终文件。")
+        stdout_str = stdout_data.decode(errors='ignore').strip()
+        logger.info(f"yutto 标准输出: {stdout_str[:500]}...")
+        
+        if "尚不支持 DASH 格式" in stdout_str:
+             raise Exception("该视频尚不支持 DASH 格式。")
+        
+        raise Exception(f"yutto 运行成功但未能生成最终文件。Stdout: {stdout_str[:100]}")
 
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None, download_dir=None):
     """主处理函数 (现在调用 yutto) """
@@ -482,10 +492,10 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
         if REG_B23.search(url): video_info = await parse_b23(REG_B23.search(url).group())
         elif REG_BV.search(url): video_info = await parse_video(REG_BV.search(url).group())
         elif REG_AV.search(url): bvid = av2bv(REG_AV.search(url).group()); video_info = await parse_video(bvid) if bvid else None
-        else: logger.warning("不支持的链接格式"); return None
-    except Exception as e: logger.error(f"解析链接时发生错误: {str(e)}"); return None
+        else: logger.warning("不支持的链接格式"); return {"error": "不支持的链接格式"}
+    except Exception as e: logger.error(f"解析链接时发生错误: {str(e)}"); return {"error": f"解析链接时发生错误: {str(e)}"}
     
-    if not video_info: logger.warning("解析视频信息失败"); return None
+    if not video_info: logger.warning("解析视频信息失败"); return {"error": "解析视频信息失败"}
     stats = video_info.get("stats", {}); bvid = video_info.get("bvid")
     
     if download_dir is None:
@@ -506,6 +516,12 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
             try:
                 filename = await download_video_yutto(bvid, cookies_file, download_dir, quality=quality, num_workers=8)
             except Exception as e:
+                # 检查是否因为 DASH 格式不支持而失败
+                error_str = str(e)
+                if "尚不支持 DASH 格式" in error_str:
+                     logger.warning(f"yutto 高清下载失败 (DASH不支持)。不再尝试降级。错误: {e}")
+                     return {"error": f"下载失败: {e}"}
+
                 logger.warning(f"yutto 高清下载失败。错误: {e}")
                 logger.info("尝试降级到360p无需登录模式...")
                 # 降级到360p（质量代码16），不使用Cookie
@@ -514,7 +530,7 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
                     logger.info(f"360p 降级下载成功: {filename}")
                 except Exception as fallback_e:
                     logger.error(f"360p 降级下载也失败: {fallback_e}")
-                    return None
+                    return {"error": f"360p 降级下载也失败: {fallback_e}"}
         else:
             # 不使用登录，直接下载360p
             logger.info("未启用登录，尝试下载360p...")
@@ -522,12 +538,12 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
                 filename = await download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8)
             except Exception as e:
                 logger.warning(f"360p下载失败。错误: {e}")
-                return None
+                return {"error": f"360p下载失败: {e}"}
 
     # 3. 检查下载结果
     if not filename and download_flag:
         logger.warning("下载失败，无法获取视频文件。")
-        return None
+        return {"error": "下载失败，无法获取视频文件 (未知错误)"}
         
     return {
         "title": video_info["title"], "cover": video_info["cover"],

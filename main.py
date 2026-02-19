@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.1.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.2.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -88,14 +88,25 @@ class videoAnalysis(Star):
         目标：如果视频过大，回复文本；否则，只发送视频组件。
         """
         
-        file_path_rel = result.get("video_path")
+        file_path_rel = result.get("video_path") if result else None
         media_component = None
         message_to_send = None
 
         # 0. 检查文件是否存在
         if not (file_path_rel and os.path.exists(file_path_rel)):
-            logger.error(f"process_bili_video/douyin_video 返回成功，但文件路径无效或文件不存在: {file_path_rel}")
-            message_to_send = [Plain("抱歉，由于网络或解析问题，无法获取视频文件。")]
+            error_msg = result.get("error") if result else None
+            
+            if error_msg:
+                logger.error(f"process_bili_video/douyin_video 失败: {error_msg}")
+                if "尚不支持 DASH 格式" in error_msg:
+                    user_msg = "抱歉，该视频暂不支持 DASH 格式下载。"
+                else:
+                    user_msg = f"抱歉，视频处理失败: {error_msg}"
+            else:
+                logger.error(f"process_bili_video/douyin_video 返回: {result}，文件路径无效或文件不存在: {file_path_rel}")
+                user_msg = "抱歉，由于网络或解析问题，无法获取视频文件。"
+                
+            message_to_send = [Plain(user_msg)]
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
         else:
@@ -227,6 +238,12 @@ class videoAnalysis(Star):
             file_path_rel = result.get("video_path") if result else None
             
             if not file_path_rel or not os.path.exists(file_path_rel):
+                # 检查是否因为不支持 DASH 格式而失败，如果是，则不进行降级重试
+                error_msg = result.get("error") if result else None
+                if error_msg and "尚不支持 DASH 格式" in error_msg:
+                    logger.warning(f"检测到不支持 DASH 格式错误，停止降级重试: {error_msg}")
+                    break
+                    
                 logger.warning("下载未成功，文件未找到。不进行大小校验，停止降级重试。")
                 break 
                 
