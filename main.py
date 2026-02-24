@@ -12,7 +12,7 @@ import asyncio
 from .modules.file_send_server import send_file
 from .modules.bili_get import (
     process_bili_video, REG_B23, REG_BV, REG_AV, av2bv, parse_b23, parse_video,
-    estimate_size, init_bili_module, bili_login, check_cookie_valid
+    estimate_size, init_bili_module, bili_login, check_cookie_valid, UnsupportedBiliLinkError
 )
 from .modules.douyin_get import process_douyin_video 
 from .modules.auto_delete import delete_old_files
@@ -26,7 +26,7 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.2.1", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.2.2", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -184,19 +184,24 @@ class videoAnalysis(Star):
         short_url_match = REG_B23.search(url)
         
         video_info = None
-        if short_url_match:
-            video_info = await parse_b23(short_url_match.group(0))
-        elif bvid_match:
-            video_info = await parse_video(bvid_match.group(0))
-        elif av_match:
-            bvid = av2bv(av_match.group(0))
-            video_info = await parse_video(bvid) if bvid else None
+        try:
+            if short_url_match:
+                video_info = await parse_b23(short_url_match.group(0))
+            elif bvid_match:
+                video_info = await parse_video(bvid_match.group(0))
+            elif av_match:
+                bvid = av2bv(av_match.group(0))
+                video_info = await parse_video(bvid) if bvid else None
+        except UnsupportedBiliLinkError as e:
+            return
 
         if not video_info:
             yield event.plain_result("抱歉，无法解析视频信息，无法进行下载。请稍后重试。")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
+
+        await self._set_emoji(event, 424)
             
         duration = video_info.get("duration", 0)
         
@@ -530,9 +535,6 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             raw = match_bili_json.group(0)
             url = raw.replace("\\\\", "\\").replace("\\/", "/")
             
-        # 触发开始解析表情回应
-        await self._set_emoji(event, 424)
-
         # 调用 Bilibili 处理函数
         async for response in self._handle_bili_parsing(event, url):
             yield response
