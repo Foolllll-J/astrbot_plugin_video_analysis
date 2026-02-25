@@ -74,6 +74,14 @@ REG_B23 = re.compile(r'(b23\.tv|bili2233\.cn)\/[\w]+')
 REG_BV = re.compile(r'BV1\w{9}')
 REG_AV = re.compile(r'av\d+', re.I)
 REG_BILI_LIVE = re.compile(r'(?:^https?://)?(?:m\.)?live\.bilibili\.com(?:/|$)', re.I)
+REG_BILI_DYNAMIC = re.compile(
+    r'(?:^https?://)?(?:'
+    r't\.bilibili\.com/\d+|'
+    r'm\.bilibili\.com/(?:dynamic|opus)/\d+|'
+    r'www\.bilibili\.com/(?:opus|h5/dynamic/detail)/\d+'
+    r')(?:[/?#]|$)',
+    re.I,
+)
 
 
 class UnsupportedBiliLinkError(Exception):
@@ -162,6 +170,9 @@ async def parse_b23(short_url):
                 if REG_BILI_LIVE.search(real_url):
                     logger.debug(f"短链解析到 Bilibili 直播间，不支持解析下载: {real_url}")
                     raise UnsupportedBiliLinkError("该链接为 Bilibili 直播间，当前不支持解析下载")
+                if REG_BILI_DYNAMIC.search(real_url):
+                    logger.debug(f"短链解析到 Bilibili 动态，不支持解析下载: {real_url}")
+                    raise UnsupportedBiliLinkError("该链接为 Bilibili 动态，当前不支持解析下载")
                 if REG_BV.search(real_url): return await parse_video(REG_BV.search(real_url).group())
                 elif REG_AV.search(real_url): return await parse_video(av2bv(REG_AV.search(real_url).group()))
                 return None
