@@ -388,7 +388,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         stderr=asyncio.subprocess.PIPE
     )
     
-    logger.info("yutto 进程已成功启动。请等待下载和合并...")
+    logger.debug("yutto 进程已成功启动。请等待下载和合并...")
 
     # 6. 捕获输出和等待
     stdout_data, stderr_data = await process.communicate()
@@ -400,22 +400,22 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         logger.error(f"yutto 错误输出: {error_output[:1000]}...")
         raise Exception(f"yutto 下载失败，请检查 yutto 日志。")
 
-    logger.info(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+    logger.debug(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
 
     # 8. 检查最终文件是否存在
     if os.path.exists(output_path):
         try:
             os.utime(output_path, None) 
-            logger.info(f"文件时间戳已更新至当前时间，防止被自动清理。")
+            logger.debug(f"文件时间戳已更新至当前时间，防止被自动清理。")
         except Exception as utime_e:
             logger.warning(f"无法更新文件时间戳 (os.utime 失败): {utime_e}")
         
-        logger.info(f"yutto 下载成功: {output_path}")
+        logger.debug(f"yutto 下载成功: {output_path}")
         return output_path
     else:
         logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
         stdout_str = stdout_data.decode(errors='ignore').strip()
-        logger.info(f"yutto 标准输出: {stdout_str[:500]}...")
+        logger.debug(f"yutto 标准输出: {stdout_str[:500]}...")
         
         if "尚不支持 DASH 格式" in stdout_str:
              raise Exception("该视频尚不支持 DASH 格式。")
@@ -468,7 +468,7 @@ async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_work
         stderr=asyncio.subprocess.PIPE
     )
     
-    logger.info("yutto 进程已成功启动（无登录模式）。请等待下载和合并...")
+    logger.debug("yutto 进程已成功启动（无登录模式）。请等待下载和合并...")
 
     # 捕获输出和等待
     stdout_data, stderr_data = await process.communicate()
@@ -480,22 +480,22 @@ async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_work
         logger.error(f"yutto 错误输出: {error_output[:1000]}...")
         raise Exception(f"yutto 下载失败（无登录模式），请检查 yutto 日志。")
 
-    logger.info(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
+    logger.debug(f"yutto 命令行执行完毕。退出码: {process.returncode}。正在检查文件。")
 
     # 检查最终文件是否存在
     if os.path.exists(output_path):
         try:
             os.utime(output_path, None) 
-            logger.info(f"文件时间戳已更新至当前时间，防止被自动清理。")
+            logger.debug(f"文件时间戳已更新至当前时间，防止被自动清理。")
         except Exception as utime_e:
             logger.warning(f"无法更新文件时间戳 (os.utime 失败): {utime_e}")
         
-        logger.info(f"yutto 下载成功（无登录模式）: {output_path}")
+        logger.debug(f"yutto 下载成功（无登录模式）: {output_path}")
         return output_path
     else:
         logger.error(f"yutto 运行成功但未生成文件：{output_path}。")
         stdout_str = stdout_data.decode(errors='ignore').strip()
-        logger.info(f"yutto 标准输出: {stdout_str[:500]}...")
+        logger.debug(f"yutto 标准输出: {stdout_str[:500]}...")
         
         if "尚不支持 DASH 格式" in stdout_str:
              raise Exception("该视频尚不支持 DASH 格式。")
@@ -504,7 +504,7 @@ async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_work
 
 async def process_bili_video(url, download_flag=True, quality=80, use_login=True, event=None, download_dir=None):
     """主处理函数 (现在调用 yutto) """
-    logger.info(f"开始处理B站链接: {url}")
+    logger.debug(f"开始处理B站链接: {url}")
     
     video_info = None
     try:
@@ -531,7 +531,7 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
     filename = None
     if download_flag:
         if use_login:
-            logger.info("调用 yutto 进行下载 (需登录凭证)...")
+            logger.debug("调用 yutto 进行下载 (需登录凭证)...")
             try:
                 filename = await download_video_yutto(bvid, cookies_file, download_dir, quality=quality, num_workers=8)
             except Exception as e:
@@ -542,17 +542,17 @@ async def process_bili_video(url, download_flag=True, quality=80, use_login=True
                      return {"error": f"下载失败: {e}"}
 
                 logger.warning(f"yutto 高清下载失败。错误: {e}")
-                logger.info("尝试降级到360p无需登录模式...")
+                logger.debug("尝试降级到360p无需登录模式...")
                 # 降级到360p（质量代码16），不使用Cookie
                 try:
                     filename = await download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8)
-                    logger.info(f"360p 降级下载成功: {filename}")
+                    logger.debug(f"360p 降级下载成功: {filename}")
                 except Exception as fallback_e:
                     logger.error(f"360p 降级下载也失败: {fallback_e}")
                     return {"error": f"360p 降级下载也失败: {fallback_e}"}
         else:
             # 不使用登录，直接下载360p
-            logger.info("未启用登录，尝试下载360p...")
+            logger.debug("未启用登录，尝试下载360p...")
             try:
                 filename = await download_video_yutto_no_login(bvid, download_dir, quality=16, num_workers=8)
             except Exception as e:

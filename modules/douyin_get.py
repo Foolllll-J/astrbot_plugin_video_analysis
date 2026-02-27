@@ -105,25 +105,25 @@ async def process_douyin_video(url: str, download_dir: str, api_url: str = None,
     
     # 1. 优先尝试本地解析 (如果有 Cookie)
     if cookie:
-        logger.info("[INFO] Douyin: 尝试本地解析 (使用 Cookie)")
+        logger.debug("Douyin: 尝试本地解析 (使用 Cookie)")
         try:
             result = await process_douyin_video_local(url, download_dir, cookie, max_images)
             if result:
                 return result
         except Exception as e:
-            logger.error(f"[ERROR] Douyin 本地解析失败: {e}")
+            logger.error(f"Douyin 本地解析失败: {e}")
             # 继续尝试 API
     
     # 2. 尝试 API 解析
     if api_url:
-        logger.info("[INFO] Douyin: 尝试 API 解析")
+        logger.debug("Douyin: 尝试 API 解析")
         # 先尝试原有的 video_data API
         result = await _try_video_data_api(url, download_dir, api_url)
         if result is not None:
             return result
         
         # 如果失败，尝试新的 download API
-        logger.info("[INFO] Douyin: 尝试 download API")
+        logger.debug("Douyin: 尝试 download API")
         result = await _try_download_api(url, download_dir, api_url, max_images)
         if result is not None:
             return result
@@ -136,7 +136,7 @@ async def process_douyin_video_local(url: str, download_dir: str, cookie: str, m
     data = await parser.parse(url)
     
     if not data or "error" in data:
-        logger.error(f"[ERROR] Douyin 本地解析返回错误: {data.get('error') if data else 'Unknown'}")
+        logger.error(f"Douyin 本地解析返回错误: {data.get('error') if data else 'Unknown'}")
         return None
         
     title = data.get("desc", "抖音作品")
@@ -157,7 +157,7 @@ async def process_douyin_video_local(url: str, download_dir: str, cookie: str, m
                 media_items.append({"path": v_file, "type": "video"})
         else: # image
             if len([m for m in media_items if m["type"] == "image"]) >= max_images:
-                logger.info(f"[INFO] Douyin 本地解析: 图片数量达到上限 {max_images}，跳过后续图片。")
+                logger.debug(f"Douyin 本地解析: 图片数量达到上限 {max_images}，跳过后续图片。")
                 continue
 
             file_ext = ".jpg"
@@ -205,7 +205,7 @@ async def _download_file(url: str, save_path: str) -> bool:
                         await f.write(chunk)
         return True
     except Exception as e:
-        logger.error(f"[ERROR] 文件下载失败: {url}, 错误: {e}")
+        logger.error(f"文件下载失败: {url}, 错误: {e}")
         if os.path.exists(save_path):
             os.remove(save_path)
         return False
@@ -228,15 +228,15 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
             response = await client.get(api_endpoint, params=params, headers=headers)
             
             if response.status_code != 200:
-                logger.error(f"[ERROR] Douyin API HTTP 错误: {response.status_code}")
-                logger.error(f"[ERROR] Douyin API 错误响应内容: {response.text}")
+                logger.error(f"Douyin API HTTP 错误: {response.status_code}")
+                logger.error(f"Douyin API 错误响应内容: {response.text}")
                 return None
                 
             api_data = response.json()
             
             if api_data.get("code") != 200 and api_data.get("status_code") != 0:
-                logger.error(f"[ERROR] Douyin API 业务错误: {api_data.get('msg', '未知业务错误')}")
-                logger.error(f"[DEBUG] Douyin API 失败 JSON: {json.dumps(api_data, ensure_ascii=False)}") 
+                logger.error(f"Douyin API 业务错误: {api_data.get('msg', '未知业务错误')}")
+                logger.debug(f"Douyin API 失败 JSON: {json.dumps(api_data, ensure_ascii=False)}")
                 return None
             
             try:
@@ -244,7 +244,7 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
             except ParseError as e:
                 return None
             except Exception as e:
-                logger.error(f"[ERROR] Douyin 解析发生未知错误: {e}", exc_info=True)
+                logger.error(f"Douyin 解析发生未知错误: {e}", exc_info=True)
                 return None
             
             if result.type != DYType.VIDEO:
@@ -256,10 +256,10 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
             video_url = result.video.url
             
     except httpx.ReadTimeout:
-        logger.error("[ERROR] Douyin API 请求超时 (30秒)。")
+        logger.error("Douyin API 请求超时 (30秒)。")
         return None
     except Exception as e:
-        logger.error(f"[ERROR] Douyin 解析或网络错误: {e}", exc_info=True)
+        logger.error(f"Douyin 解析或网络错误: {e}", exc_info=True)
         return None
 
     # 3. 文件命名和缓存检查 (使用 URL 的 MD5 哈希作为唯一 ID)
@@ -282,7 +282,7 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
                     async for chunk in response.aiter_bytes():
                         await f.write(chunk)
                         
-        logger.info(f"[INFO] Douyin 视频下载完成")
+        logger.debug("Douyin 视频下载完成")
         return {
             "title": result.desc,
             "author": result.author,
@@ -292,14 +292,14 @@ async def _try_video_data_api(url: str, download_dir: str, api_url: str):
         }
         
     except Exception as e:
-        logger.error(f"[ERROR] Douyin 文件下载失败: {e}")
+        logger.error(f"Douyin 文件下载失败: {e}")
         if os.path.exists(final_file):
             os.remove(final_file)
         return None
 
 async def _try_download_api(url: str, download_dir: str, api_url: str, max_images: int = 20):
     """尝试使用 download API 下载"""
-    logger.info(f"[INFO] Douyin: 开始使用 download API 解析")
+    logger.debug("Douyin: 开始使用 download API 解析")
     
     api_endpoint = f"{api_url}/api/download"
     
@@ -318,8 +318,8 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
             response = await client.get(api_endpoint, params=params, headers=headers)
             
             if response.status_code != 200:
-                logger.error(f"[ERROR] Douyin download API HTTP 错误: {response.status_code}")
-                logger.error(f"[ERROR] 响应内容前500字符: {response.text[:500]}")
+                logger.error(f"Douyin download API HTTP 错误: {response.status_code}")
+                logger.error(f"响应内容前500字符: {response.text[:500]}")
                 return None
             
             # 检查 Content-Type 来判断是图片还是视频
@@ -329,7 +329,7 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
             if 'application/json' in content_type:
                 try:
                     error_data = response.json()
-                    logger.error(f"[ERROR] Douyin download API 返回 JSON 错误: {json.dumps(error_data, ensure_ascii=False)}")
+                    logger.error(f"Douyin download API 返回 JSON 错误: {json.dumps(error_data, ensure_ascii=False)}")
                     return None
                 except:
                     pass
@@ -341,7 +341,7 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
             
             # 判断文件类型
             if 'image' in content_type:
-                logger.info("[INFO] Douyin download API: 检测到图片类型")
+                logger.debug("Douyin download API: 检测到图片类型")
                 
                 # 保存文件
                 file_ext = '.jpg' if 'jpeg' in content_type or 'jpg' in content_type else '.png' if 'png' in content_type else '.jpg'
@@ -350,7 +350,7 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
                 async with aiofiles.open(final_file, 'wb') as f:
                     await f.write(response.content)
                 
-                logger.info(f"[INFO] Douyin 单张图片下载完成")
+                logger.debug("Douyin 单张图片下载完成")
                 return {
                     "title": "抖音图片",
                     "author": "N/A",
@@ -373,7 +373,7 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
                 async with aiofiles.open(final_file, 'wb') as f:
                     await f.write(response.content)
                 
-                logger.info(f"[INFO] Douyin 视频下载完成")
+                logger.debug("Douyin 视频下载完成")
                 return {
                     "title": "抖音视频",
                     "author": "N/A",
@@ -382,7 +382,7 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
                 }
             
             elif 'application/zip' in content_type or 'application/x-zip' in content_type:
-                logger.info("[INFO] Douyin: 检测到图集（ZIP）")
+                logger.debug("Douyin: 检测到图集（ZIP）")
                 # 下载并解压 ZIP
                 zip_file = os.path.join(download_dir, f"{simple_id}.zip")
                 
@@ -403,13 +403,13 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
                     for file in files:
                         if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
                             if len(image_files) >= max_images:
-                                logger.info(f"[INFO] Douyin API 解析: 图片数量达到上限 {max_images}，忽略其余提取的图片。")
+                                logger.debug(f"Douyin API 解析: 图片数量达到上限 {max_images}，忽略其余提取的图片。")
                                 break
                             image_files.append(os.path.join(root, file))
                     if len(image_files) >= max_images:
                         break
                 
-                logger.info(f"[INFO] 从ZIP中提取了 {len(image_files)} 张图片")
+                logger.debug(f"从ZIP中提取了 {len(image_files)} 张图片")
                 
                 # 删除 ZIP 文件
                 os.remove(zip_file)
@@ -423,13 +423,13 @@ async def _try_download_api(url: str, download_dir: str, api_url: str, max_image
                 }
             
             else:
-                logger.warning(f"[WARN] Douyin download API: 未知的 Content-Type: {content_type}")
-                logger.warning(f"[WARN] 响应内容前500字符: {response.text[:500]}")
+                logger.warning(f"Douyin download API: 未知的 Content-Type: {content_type}")
+                logger.warning(f"响应内容前500字符: {response.text[:500]}")
                 return None
                 
     except httpx.ReadTimeout:
-        logger.error("[ERROR] Douyin download API 请求超时")
+        logger.error("Douyin download API 请求超时")
         return None
     except Exception as e:
-        logger.error(f"[ERROR] Douyin download API 错误: {e}", exc_info=True)
+        logger.error(f"Douyin download API 错误: {e}", exc_info=True)
         return None

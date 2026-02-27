@@ -31,19 +31,19 @@ def delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
                     if os.path.isfile(item_path):
                         # 删除文件
                         os.remove(item_path)
-                        logger.info(f"已删除过期文件: {item_path}")
+                        logger.debug(f"已删除过期文件: {item_path}")
                         deleted_count += 1
                     elif os.path.isdir(item_path):
                         # 删除目录及其内容
                         import shutil
                         shutil.rmtree(item_path)
-                        logger.info(f"已删除过期目录: {item_path}")
+                        logger.debug(f"已删除过期目录: {item_path}")
                         deleted_count += 1
             except OSError as e:
                 logger.error(f"删除项目失败 {item_path}: {e}")
         
         if deleted_count > 0:
-            logger.info(f"清理完成，共删除 {deleted_count} 个过期项目")
+            logger.debug(f"清理完成，共删除 {deleted_count} 个过期项目")
         
         return deleted_count
         

@@ -1,29 +1,35 @@
 {
     "nap_server_address": {
-        "description": "Napcat服务地址",
+        "description": "Napcat 服务地址",
         "hint": "若与服务器在同一服务器上请保持默认。",
         "type": "string",
         "default": "localhost"
     },
     "nap_server_port": {
-        "description": "Napcat所处服务器接收文件端口",
+        "description": "Napcat 所处服务器接收文件端口",
         "hint": "若与服务器在同一服务器上请保持默认。",
         "type": "int",
         "default": 3658
     },
-    "group_whitelist": { 
+    "group_whitelist": {
         "description": "群聊白名单",
         "hint": "视频解析群组白名单。只有在此列表中的群组收到的消息才尝试解析。留空表示在所有群组启用。",
         "type": "list",
         "default": []
     },
-    "delete_time":{
+    "enable_private_parse": {
+        "description": "私聊启用解析",
+        "hint": "关闭后，插件仅在群聊中工作，私聊中的链接不会触发解析。",
+        "type": "bool",
+        "default": true
+    },
+    "delete_time": {
         "description": "删除文件时间（分钟）",
         "hint": "视频文件保存的时间，超过此时间将被自动删除。",
         "type": "int",
         "default": 60
     },
-    "max_video_size":{
+    "max_video_size": {
         "description": "最大视频大小（MB）",
         "hint": "视频文件的最大允许大小，超过此限制将无法发送。",
         "type": "int",
@@ -35,45 +41,96 @@
         "type": "bool",
         "default": true
     },
-    "bili_use_login": {
-        "description": "使用登录状态下载B站视频",
-        "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式。",
-        "type": "bool",
-        "default": false
+    "bilibili": {
+        "type": "object",
+        "description": "B站解析配置",
+        "hint": "配置 B站 视频下载清晰度与登录策略。",
+        "items": {
+            "use_login": {
+                "description": "使用登录状态下载",
+                "hint": "启用后将尝试使用登录状态下载高清视频，禁用则强制使用无登录方式。",
+                "type": "bool",
+                "default": false
+            },
+            "quality": {
+                "description": "视频清晰度",
+                "hint": "16: 360P | 32: 480P | 64: 720P | 80: 1080P | 112: 1080P+（高码率）| 120: 4K",
+                "type": "int",
+                "default": 64
+            },
+            "smart_downgrade": {
+                "description": "清晰度智能降级",
+                "hint": "开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制。",
+                "type": "bool",
+                "default": true
+            }
+        }
     },
-    "bili_quality":{
-        "description": "B站视频清晰度",
-        "hint" :"16: 360P|32: 480P|64: 720P|80: 1080P|112: 1080P+（高码率）|120: 4K",
-        "type": "int",
-        "default": 64
+    "douyin": {
+        "type": "object",
+        "description": "抖音解析配置",
+        "hint": "配置抖音本地解析与 API 兜底策略。",
+        "items": {
+            "cookie": {
+                "description": "抖音 Cookie",
+                "hint": "选填，用于本地解析抖音视频。",
+                "type": "string",
+                "default": null
+            },
+            "api_url": {
+                "description": "抖音解析 API 地址",
+                "hint": "选填。若填写了 Cookie 则作为本地解析失败后的兜底；若未填 Cookie 则作为唯一解析方案；若均未填则禁用抖音解析。",
+                "type": "string",
+                "default": ""
+            },
+            "max_images": {
+                "description": "抖音图文作品解析上限",
+                "hint": "设置抖音图文作品解析的最大图片数量，超过此上限的图片将被忽略。",
+                "type": "int",
+                "slider": {
+                    "min": 1,
+                    "max": 99,
+                    "step": 1
+                },
+                "default": 20
+            }
+        }
     },
-    "bili_smart_downgrade":{
-        "description": "B站视频清晰度智能降级",
-        "hint" :"开启后，长视频将自动降级清晰度，以避免超出 max_video_size 限制。",
-        "type": "bool",
-        "default": true
-    },
-    "douyin_cookie": {
-        "description": "抖音 Cookie",
-        "hint": "选填，用于本地解析抖音视频。",
-        "type": "string",
-        "default": null
-    },
-    "douyin_api_url": {
-        "description": "抖音解析 API 地址",
-        "hint": "选填。若填写了 Cookie 则作为本地解析失败后的兜底；若未填 Cookie 则作为唯一解析方案；若均未填则禁用抖音解析。",
-        "type": "string",
-        "default": ""
-    },
-    "douyin_max_images": {
-        "description": "抖音图文作品解析上限",
-        "hint": "设置抖音图文作品解析的最大图片数量，超过此上限的图片将被忽略。",
-        "type": "int",
-        "slider": {
-            "min": 1,
-            "max": 99,
-            "step": 1
-        },
-        "default": 20
+    "rate_limit": {
+        "type": "object",
+        "description": "限频配置",
+        "hint": "仅作用于群聊成员。",
+        "items": {
+            "enable": {
+                "description": "启用限频",
+                "hint": "开启后，将对同一群聊成员的短时间连续解析请求进行限制。",
+                "type": "bool",
+                "default": true
+            },
+            "window_sec": {
+                "description": "统计窗口（秒）",
+                "hint": "在该时间窗口内统计请求次数。",
+                "type": "int",
+                "default": 30
+            },
+            "max_requests": {
+                "description": "窗口内最大请求数",
+                "hint": "同一群聊成员在统计窗口内允许的最大解析次数。",
+                "type": "int",
+                "default": 2
+            },
+            "cooldown_sec": {
+                "description": "冷却时长（秒）",
+                "hint": "触发超限后，在冷却时间内继续请求会被直接拦截。",
+                "type": "int",
+                "default": 60
+            },
+            "block_parallel": {
+                "description": "拦截并发解析",
+                "hint": "开启后，同一群聊成员上一条解析未完成前，新解析请求会被拦截。",
+                "type": "bool",
+                "default": true
+            }
+        }
     }
 }

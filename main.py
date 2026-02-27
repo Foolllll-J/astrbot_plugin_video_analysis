@@ -16,6 +16,7 @@ from .modules.bili_get import (
 )
 from .modules.douyin_get import process_douyin_video 
 from .modules.auto_delete import delete_old_files
+from .modules.rate_limiter import ParseRateLimiter
 
 MAX_PROCESS_RETRIES = 0
 MAX_SEND_RETRIES = 2
@@ -26,22 +27,48 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(None, delete_old_files, folder_path, time_threshold_minutes)
 
 
-@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.2.2", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
+@register("astrbot_plugin_video_analysis", "Foolllll", "可以解析B站和抖音视频及图片", "1.3.0", "https://github.com/Foolllll-J/astrbot_plugin_video_analysis")
 class videoAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
+        bili_config = config.get("bilibili", {})
+        if not isinstance(bili_config, dict):
+            bili_config = {}
+        douyin_config = config.get("douyin", {})
+        if not isinstance(douyin_config, dict):
+            douyin_config = {}
+        rate_limit_config = config.get("rate_limit", {})
+        if not isinstance(rate_limit_config, dict):
+            rate_limit_config = {}
+
         self.nap_server_address = config.get("nap_server_address", "localhost")
         self.nap_server_port = config.get("nap_server_port", 3658)
         self.group_whitelist: List[int] = [int(gid) for gid in config.get("group_whitelist", [])]
+        self.enable_private_parse = config.get("enable_private_parse", True)
         self.delete_time = config.get("delete_time", 60)    
         self.max_video_size = config.get("max_video_size", 200)
-        self.bili_quality = config.get("bili_quality", 32)
-        self.bili_use_login = config.get("bili_use_login", False)
-        self.bili_smart_downgrade = config.get("bili_smart_downgrade", True)
-        self.douyin_cookie = config.get("douyin_cookie", None)
-        self.douyin_api_url = config.get("douyin_api_url", None)
-        self.douyin_max_images = config.get("douyin_max_images", 20)
+        self.bili_quality = bili_config.get("quality", 64)
+        self.bili_use_login = bili_config.get("use_login", False)
+        self.bili_smart_downgrade = bili_config.get("smart_downgrade", True)
+        self.douyin_cookie = douyin_config.get("cookie", None)
+        self.douyin_api_url = douyin_config.get("api_url", "")
+        self.douyin_max_images = douyin_config.get("max_images", 20)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
+
+        self.enable_rate_limit = rate_limit_config.get("enable", True)
+        self.rate_limit_window_sec = max(1, int(rate_limit_config.get("window_sec", 30)))
+        self.rate_limit_max_requests = max(1, int(rate_limit_config.get("max_requests", 2)))
+        self.rate_limit_cooldown_sec = max(1, int(rate_limit_config.get("cooldown_sec", 60)))
+        self.rate_limit_block_parallel = rate_limit_config.get("block_parallel", True)
+        self.rate_limiter = ParseRateLimiter(
+            enable=self.enable_rate_limit,
+            window_sec=self.rate_limit_window_sec,
+            max_requests=self.rate_limit_max_requests,
+            cooldown_sec=self.rate_limit_cooldown_sec,
+            block_parallel=self.rate_limit_block_parallel,
+            logger_obj=logger,
+        )
+        self._emoji_unsupported_logged_platforms = set()
         
         # 设置数据目录
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
@@ -52,13 +79,59 @@ class videoAnalysis(Star):
         cookie_file = os.path.join(self.data_dir, "bili_cookies.json")
         init_bili_module(cookie_file)
         
-        logger.info(f"插件初始化完成。配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, 启用群组: {self.group_whitelist if self.group_whitelist else '全部'}")
+        logger.info(
+            "插件初始化完成。"
+            f"配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, "
+            f"B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, "
+            f"启用群组: {self.group_whitelist if self.group_whitelist else '全部'}, "
+            f"私聊启用={self.enable_private_parse}, "
+            f"限频启用={self.enable_rate_limit}({self.rate_limit_window_sec}s/{self.rate_limit_max_requests}次, 冷却{self.rate_limit_cooldown_sec}s, 并发拦截={self.rate_limit_block_parallel})"
+        )
+
+    def _build_rate_limit_key(self, event: AstrMessageEvent):
+        """限频作用域固定为群聊成员：group_id + sender_id"""
+        group_id = event.get_group_id()
+        sender_id = event.get_sender_id()
+        if not group_id or not sender_id:
+            return None
+        return f"{group_id}:{sender_id}"
+
+    async def _try_acquire_parse_slot(self, event: AstrMessageEvent, platform: str):
+        key = self._build_rate_limit_key(event)
+        return await self.rate_limiter.acquire(key=key, platform=platform)
+
+    async def _release_parse_slot(self, rate_limit_key):
+        await self.rate_limiter.release(rate_limit_key)
+
+    def _is_admin_event(self, event: AstrMessageEvent) -> bool:
+        try:
+            return bool(event.is_admin())
+        except Exception:
+            return False
+
+    def _get_platform_name(self, event: AstrMessageEvent) -> str:
+        """获取平台名，优先事件方法，失败时回退 unified_msg_origin 前缀。"""
+        try:
+            platform_name = event.get_platform_name()
+            if platform_name:
+                return str(platform_name)
+        except Exception:
+            pass
+
+        umo = getattr(event, "unified_msg_origin", "") or ""
+        if ":" in umo:
+            return umo.split(":", 1)[0]
+        return "unknown"
+
+    def _is_aiocqhttp_platform(self, event: AstrMessageEvent) -> bool:
+        """当前是否为 QQ(aiocqhttp) 平台。"""
+        return self._get_platform_name(event) == "aiocqhttp"
 
     async def _send_file_if_needed(self, file_path: str) -> str:
         """Helper function to send file through NAP server if needed"""
         if self.nap_server_address != "localhost":
             return await send_file(file_path, HOST=self.nap_server_address, PORT=self.nap_server_port)
-        logger.info(f"检测到本地地址，直接使用文件路径：{file_path}")
+        logger.debug(f"检测到本地地址，直接使用文件路径：{file_path}")
         return file_path
 
     def _create_node(self, event, content):
@@ -72,6 +145,12 @@ class videoAnalysis(Star):
     async def _set_emoji(self, event: AstrMessageEvent, emoji_id: int, set_val: bool = True):
         """Helper function to set/unset emoji reaction if enabled"""
         if not self.enable_emoji_reaction:
+            return
+        if not self._is_aiocqhttp_platform(event):
+            platform_name = self._get_platform_name(event)
+            if platform_name not in self._emoji_unsupported_logged_platforms:
+                self._emoji_unsupported_logged_platforms.add(platform_name)
+                logger.info(f"当前平台({platform_name})不支持消息表情回应，已自动跳过。")
             return
         try:
             await event.bot.set_msg_emoji_like(
@@ -111,7 +190,7 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
         else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
-            logger.info(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
+            logger.debug(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
 
             # 1. 判断是否超出大小限制
             if file_size_mb > self.max_video_size:
@@ -126,7 +205,7 @@ class videoAnalysis(Star):
                 
                 media_component = Comp.Video.fromFileSystem(path = nap_file_path)
                 message_to_send = [media_component]
-                logger.info(f"视频在大小限制内，构建 Video 组件。")
+                logger.debug(f"视频在大小限制内，构建 Video 组件。")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 124)
 
@@ -159,7 +238,7 @@ class videoAnalysis(Star):
 
         # 4. 文件清理
         download_dir_platform = os.path.join(self.download_dir, platform)
-        logger.info(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_platform})")
+        logger.debug(f"发送完成，开始清理 {platform} 旧文件，阈值：{self.delete_time}分钟 (目录: {download_dir_platform})")
         await async_delete_old_files(download_dir_platform, self.delete_time)
 
     async def _handle_bili_parsing(self, event: AstrMessageEvent, url: str):
@@ -218,7 +297,7 @@ class videoAnalysis(Star):
                         if next_q is None or next_q == temp_quality: break
                         temp_quality = next_q
                     target_quality = temp_quality
-                    logger.info(f"智能预估：视频时长 {duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。")
+                    logger.debug(f"智能预估：视频时长 {duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。")
                 
                 current_quality = target_quality
 
@@ -231,7 +310,7 @@ class videoAnalysis(Star):
                 logger.warning(f"文件超限，启动后置校验降级重试。新质量: {current_quality} (第 {downgrade_count} 次降级)。")
 
             download_attempts += 1
-            logger.info(f"[INFO] 正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})...")
+            logger.debug(f"正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})...")
 
             try:
                 result = await process_bili_video(url, download_flag=videos_download, quality=current_quality, use_login=use_login, event=None, download_dir=os.path.join(self.download_dir, "bili"))
@@ -255,7 +334,7 @@ class videoAnalysis(Star):
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             
             if file_size_mb <= max_size:
-                logger.info(f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。")
+                logger.debug(f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。")
                 break 
             
             # 文件过大，检查是否还能继续降级
@@ -267,7 +346,7 @@ class videoAnalysis(Star):
                 logger.warning(f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。删除文件，准备降级重试...")
                 try:
                     os.remove(file_path_rel)
-                    logger.info(f"已删除超限文件: {file_path_rel}")
+                    logger.debug(f"已删除超限文件: {file_path_rel}")
                 except Exception as e:
                     logger.error(f"删除超限文件失败: {e}")
             else:
@@ -289,7 +368,7 @@ class videoAnalysis(Star):
 
         for attempt in range(MAX_PROCESS_RETRIES + 1):
             try:
-                logger.info(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
+                logger.debug(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
                 
                 result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie, max_images=self.douyin_max_images) 
                 
@@ -305,12 +384,12 @@ class videoAnalysis(Star):
                         result.get("ordered_media")
                     )
                     if has_media:
-                        logger.info(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('ordered_media', []) or result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
+                        logger.debug(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('ordered_media', []) or result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
                         break
                 
                 # 检查文件是否存在（单视频）
                 if result and result.get("video_path") and os.path.exists(result["video_path"]):
-                    logger.info(f"第 {attempt + 1} 次尝试成功，文件已找到。")
+                    logger.debug(f"第 {attempt + 1} 次尝试成功，文件已找到。")
                     break 
                 if attempt < MAX_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.")
                 
@@ -375,7 +454,7 @@ class videoAnalysis(Star):
                     yield event.chain_result([Image.fromFileSystem(path=nap_file_path)])
                 else:
                     yield event.chain_result([Comp.Video.fromFileSystem(path=nap_file_path)])
-                logger.info(f"成功直接发送单个媒体文件: {media_path}")
+                logger.debug(f"成功直接发送单个媒体文件: {media_path}")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 124)
                 return
@@ -387,7 +466,41 @@ class videoAnalysis(Star):
                 return
 
         # --- 多个媒体使用合并转发 ---
-        logger.info(f"准备发送 {len(ordered_media)} 个媒体文件（保持顺序，合并转发）")
+        if not self._is_aiocqhttp_platform(event):
+            platform_name = self._get_platform_name(event)
+            logger.info(f"当前平台({platform_name})不支持合并转发，已降级为逐条发送抖音多媒体。")
+
+            success_count = 0
+            for idx, item in enumerate(ordered_media, 1):
+                media_path = item["path"]
+                media_type = item["type"]
+
+                if not os.path.exists(media_path):
+                    logger.warning(f"文件不存在: {media_path}")
+                    continue
+
+                try:
+                    nap_file_path = await self._send_file_if_needed(media_path)
+                    if media_type == "image":
+                        component = Image.fromFileSystem(path=nap_file_path)
+                    else:
+                        component = Comp.Video.fromFileSystem(path=nap_file_path)
+                    yield event.chain_result([component])
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"降级发送第 {idx} 个媒体 ({media_type}) 失败: {e}", exc_info=True)
+
+            if success_count == 0:
+                yield event.plain_result("抱歉，当前平台暂不支持该多媒体发送方式。")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 357)
+                return
+
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 124)
+            return
+
+        logger.debug(f"准备发送 {len(ordered_media)} 个媒体文件（保持顺序，合并转发）")
         
         sender_id = event.get_self_id()
         forward_nodes = []
@@ -421,7 +534,7 @@ class videoAnalysis(Star):
         try:
             merged_forward_message = Nodes(nodes=forward_nodes)
             yield event.chain_result([merged_forward_message])
-            logger.info(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
+            logger.debug(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 124)
         except Exception as e:
@@ -506,6 +619,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     自动检测消息中是否包含分享链接，并分发给相应的处理器。
     """
     group_id = event.get_group_id()
+    if not group_id and not self.enable_private_parse:
+        return
+
     if group_id:
         try:
             group_id = int(group_id)
@@ -534,10 +650,19 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         else:
             raw = match_bili_json.group(0)
             url = raw.replace("\\\\", "\\").replace("\\/", "/")
-            
-        # 调用 Bilibili 处理函数
-        async for response in self._handle_bili_parsing(event, url):
-            yield response
+
+        rate_limit_key = None
+        if not self._is_admin_event(event):
+            allowed, rate_limit_key = await self._try_acquire_parse_slot(event, "B站")
+            if not allowed:
+                return
+
+        try:
+            # 调用 Bilibili 处理函数
+            async for response in self._handle_bili_parsing(event, url):
+                yield response
+        finally:
+            await self._release_parse_slot(rate_limit_key)
         return
         
     # --- 2. 检查 抖音/TikTok 链接 ---
@@ -553,10 +678,19 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         url = match_douyin.group(1)
         logger.info(f"成功匹配到抖音短链接：{url}")
         
-        # 触发开始解析表情回应
-        await self._set_emoji(event, 424)
+        rate_limit_key = None
+        if not self._is_admin_event(event):
+            allowed, rate_limit_key = await self._try_acquire_parse_slot(event, "抖音")
+            if not allowed:
+                return
 
-        # 调用抖音处理函数
-        async for response in self._handle_douyin_parsing(event, url):
-            yield response
+        try:
+            # 触发开始解析表情回应
+            await self._set_emoji(event, 424)
+
+            # 调用抖音处理函数
+            async for response in self._handle_douyin_parsing(event, url):
+                yield response
+        finally:
+            await self._release_parse_slot(rate_limit_key)
         return
