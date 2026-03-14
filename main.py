@@ -8,6 +8,7 @@ import astrbot.api.message_components as Comp
 import re
 import os
 import asyncio
+from typing import List
 
 from .modules.file_send_server import send_file
 from .modules.bili_get import (
@@ -16,7 +17,11 @@ from .modules.bili_get import (
 )
 from .modules.douyin_get import process_douyin_video 
 from .modules.auto_delete import delete_old_files
-from .modules.rate_limiter import ParseRateLimiter
+from .modules.parse_guard import (
+    ParseGuard,
+    check_group_level_requirement,
+    contains_blocked_keyword,
+)
 
 MAX_PROCESS_RETRIES = 0
 MAX_SEND_RETRIES = 2
@@ -35,14 +40,13 @@ class videoAnalysis(Star):
         douyin_config = config.get("douyin", {})
         if not isinstance(douyin_config, dict):
             douyin_config = {}
-        rate_limit_config = config.get("rate_limit", {})
-        if not isinstance(rate_limit_config, dict):
-            rate_limit_config = {}
+        parse_throttle_config = config.get("parse_throttle", {})
+        if not isinstance(parse_throttle_config, dict):
+            parse_throttle_config = {}
 
         self.nap_server_address = config.get("nap_server_address", "localhost")
         self.nap_server_port = config.get("nap_server_port", 3658)
-        self.group_whitelist: List[int] = [int(gid) for gid in config.get("group_whitelist", [])]
-        self.enable_private_parse = config.get("enable_private_parse", True)
+        self.session_whitelist: List[str] = [str(sid) for sid in config.get("session_whitelist", []) if str(sid).strip()]
         self.delete_time = config.get("delete_time", 60)    
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = bili_config.get("quality", 64)
@@ -52,21 +56,24 @@ class videoAnalysis(Star):
         self.douyin_api_url = douyin_config.get("api_url", "")
         self.douyin_max_images = douyin_config.get("max_images", 20)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
+        self.blocked_keywords: List[str] = [str(kw).strip() for kw in parse_throttle_config.get("blocked_keywords", []) if str(kw).strip()]
 
-        self.enable_rate_limit = rate_limit_config.get("enable", True)
-        self.rate_limit_window_sec = max(1, int(rate_limit_config.get("window_sec", 30)))
-        self.rate_limit_max_requests = max(1, int(rate_limit_config.get("max_requests", 2)))
-        self.rate_limit_cooldown_sec = max(1, int(rate_limit_config.get("cooldown_sec", 60)))
-        self.rate_limit_block_parallel = rate_limit_config.get("block_parallel", True)
-        self.rate_limiter = ParseRateLimiter(
-            enable=self.enable_rate_limit,
-            window_sec=self.rate_limit_window_sec,
-            max_requests=self.rate_limit_max_requests,
-            cooldown_sec=self.rate_limit_cooldown_sec,
-            block_parallel=self.rate_limit_block_parallel,
+        self.parse_throttle_window_sec = max(0, int(parse_throttle_config.get("window_sec", 0)))
+        self.parse_throttle_max_requests = max(1, int(parse_throttle_config.get("max_requests", 2)))
+        self.parse_throttle_cooldown_sec = max(1, int(parse_throttle_config.get("cooldown_sec", 60)))
+        self.parse_throttle_block_parallel = parse_throttle_config.get("block_parallel", True)
+        self.parse_throttle_min_group_level = max(0, int(parse_throttle_config.get("min_group_level", 0)))
+        self.enable_parse_throttle = self.parse_throttle_window_sec > 0
+        self.parse_guard = ParseGuard(
+            enable=self.enable_parse_throttle,
+            window_sec=max(1, self.parse_throttle_window_sec or 1),
+            max_requests=self.parse_throttle_max_requests,
+            cooldown_sec=self.parse_throttle_cooldown_sec,
+            block_parallel=self.parse_throttle_block_parallel,
             logger_obj=logger,
         )
         self._emoji_unsupported_logged_platforms = set()
+        self._group_level_unsupported_logged_platforms = set()
         
         # 设置数据目录
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
@@ -76,17 +83,8 @@ class videoAnalysis(Star):
         # 初始化 bili_get 模块
         cookie_file = os.path.join(self.data_dir, "bili_cookies.json")
         init_bili_module(cookie_file)
-        
-        logger.info(
-            "插件初始化完成。"
-            f"配置：NAP地址={self.nap_server_address}:{self.nap_server_port}, "
-            f"B站质量={self.bili_quality}, 使用登录={self.bili_use_login}, 智能降级={self.bili_smart_downgrade}, "
-            f"启用群组: {self.group_whitelist if self.group_whitelist else '全部'}, "
-            f"私聊启用={self.enable_private_parse}, "
-            f"限频启用={self.enable_rate_limit}({self.rate_limit_window_sec}s/{self.rate_limit_max_requests}次, 冷却{self.rate_limit_cooldown_sec}s, 并发拦截={self.rate_limit_block_parallel})"
-        )
 
-    def _build_rate_limit_key(self, event: AstrMessageEvent):
+    def _build_parse_throttle_key(self, event: AstrMessageEvent):
         """限频作用域固定为群聊成员：group_id + sender_id"""
         group_id = event.get_group_id()
         sender_id = event.get_sender_id()
@@ -95,11 +93,11 @@ class videoAnalysis(Star):
         return f"{group_id}:{sender_id}"
 
     async def _try_acquire_parse_slot(self, event: AstrMessageEvent, platform: str):
-        key = self._build_rate_limit_key(event)
-        return await self.rate_limiter.acquire(key=key, platform=platform)
+        key = self._build_parse_throttle_key(event)
+        return await self.parse_guard.acquire(key=key, platform=platform)
 
-    async def _release_parse_slot(self, rate_limit_key):
-        await self.rate_limiter.release(rate_limit_key)
+    async def _release_parse_slot(self, parse_guard_key):
+        await self.parse_guard.release(parse_guard_key)
 
     def _is_admin_event(self, event: AstrMessageEvent) -> bool:
         try:
@@ -107,23 +105,20 @@ class videoAnalysis(Star):
         except Exception:
             return False
 
-    def _get_platform_name(self, event: AstrMessageEvent) -> str:
-        """获取平台名，优先事件方法，失败时回退 unified_msg_origin 前缀。"""
-        try:
-            platform_name = event.get_platform_name()
-            if platform_name:
-                return str(platform_name)
-        except Exception:
-            pass
 
-        umo = getattr(event, "unified_msg_origin", "") or ""
-        if ":" in umo:
-            return umo.split(":", 1)[0]
-        return "unknown"
+    def _is_session_allowed(self, event: AstrMessageEvent) -> bool:
+        if not self.session_whitelist:
+            return True
+        session_id = event.get_group_id() or event.get_sender_id()
+        return str(session_id) in self.session_whitelist
 
-    def _is_aiocqhttp_platform(self, event: AstrMessageEvent) -> bool:
-        """当前是否为 QQ(aiocqhttp) 平台。"""
-        return self._get_platform_name(event) == "aiocqhttp"
+    async def _check_group_level_requirement(self, event: AstrMessageEvent) -> bool:
+        return await check_group_level_requirement(
+            event=event,
+            min_group_level=self.parse_throttle_min_group_level,
+            logger_obj=logger,
+            unsupported_logged_platforms=self._group_level_unsupported_logged_platforms,
+        )
 
     async def _send_file_if_needed(self, file_path: str) -> str:
         """Helper function to send file through NAP server if needed"""
@@ -144,11 +139,10 @@ class videoAnalysis(Star):
         """Helper function to set/unset emoji reaction if enabled"""
         if not self.enable_emoji_reaction:
             return
-        if not self._is_aiocqhttp_platform(event):
-            platform_name = self._get_platform_name(event)
-            if platform_name not in self._emoji_unsupported_logged_platforms:
-                self._emoji_unsupported_logged_platforms.add(platform_name)
-                logger.info(f"当前平台({platform_name})不支持消息表情回应，已自动跳过。")
+        if event.get_platform_name() != "aiocqhttp":
+            if "non_qq" not in self._emoji_unsupported_logged_platforms:
+                self._emoji_unsupported_logged_platforms.add("non_qq")
+                logger.debug("当前平台不支持消息表情回应，已自动跳过。")
             return
         try:
             await event.bot.set_msg_emoji_like(
@@ -451,7 +445,6 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
             return
         
-        # --- 优化：单个媒体直接发送 ---
         if len(ordered_media) == 1:
             item = ordered_media[0]
             media_path = item["path"]
@@ -479,9 +472,8 @@ class videoAnalysis(Star):
                 return
 
         # --- 多个媒体使用合并转发 ---
-        if not self._is_aiocqhttp_platform(event):
-            platform_name = self._get_platform_name(event)
-            logger.info(f"当前平台({platform_name})不支持合并转发，已降级为逐条发送抖音多媒体。")
+        if event.get_platform_name() != "aiocqhttp":
+            logger.debug("当前平台不支持合并转发，已降级为逐条发送抖音多媒体。")
 
             success_count = 0
             for idx, item in enumerate(ordered_media, 1):
@@ -631,19 +623,8 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     """
     自动检测消息中是否包含分享链接，并分发给相应的处理器。
     """
-    group_id = event.get_group_id()
-    if not group_id and not self.enable_private_parse:
+    if not self._is_session_allowed(event):
         return
-
-    if group_id:
-        try:
-            group_id = int(group_id)
-        except ValueError:
-            logger.info(f"无法将群组 ID '{group_id}' 转换为整数，跳过过滤。")
-            return
-            
-        if self.group_whitelist and group_id not in self.group_whitelist:
-            return
 
     message_str = event.message_str
     message_obj_str = str(event.message_obj)
@@ -658,15 +639,20 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         match_bili_json = re.search(r"https:\\\\/\\\\/(?:b23\.tv|bili2233\.cn)\\\\/[a-zA-Z0-9]+", message_obj_str)
     
     if match_bili or match_bili_json:
+        if contains_blocked_keyword(event, self.blocked_keywords, logger):
+            return
+
         if match_bili:
             url = match_bili.group(1)
         else:
             raw = match_bili_json.group(0)
             url = raw.replace("\\\\", "\\").replace("\\/", "/")
 
-        rate_limit_key = None
+        parse_guard_key = None
         if not self._is_admin_event(event):
-            allowed, rate_limit_key = await self._try_acquire_parse_slot(event, "B站")
+            if not await self._check_group_level_requirement(event):
+                return
+            allowed, parse_guard_key = await self._try_acquire_parse_slot(event, "B站")
             if not allowed:
                 return
 
@@ -675,7 +661,7 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             async for response in self._handle_bili_parsing(event, url):
                 yield response
         finally:
-            await self._release_parse_slot(rate_limit_key)
+            await self._release_parse_slot(parse_guard_key)
         return
         
     # --- 2. 检查 抖音/TikTok 链接 ---
@@ -683,6 +669,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
 
     if match_douyin:
+        if contains_blocked_keyword(event, self.blocked_keywords, logger):
+            return
+
         # 检查是否配置了 API 地址或 Cookie
         if not self.douyin_api_url and not self.douyin_cookie:
             logger.warning("成功匹配到抖音链接，但 douyin_api_url 和 douyin_cookie 均未配置，跳过解析。")
@@ -691,9 +680,11 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         url = match_douyin.group(1)
         logger.info(f"成功匹配到抖音短链接：{url}")
         
-        rate_limit_key = None
+        parse_guard_key = None
         if not self._is_admin_event(event):
-            allowed, rate_limit_key = await self._try_acquire_parse_slot(event, "抖音")
+            if not await self._check_group_level_requirement(event):
+                return
+            allowed, parse_guard_key = await self._try_acquire_parse_slot(event, "抖音")
             if not allowed:
                 return
 
@@ -705,5 +696,5 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             async for response in self._handle_douyin_parsing(event, url):
                 yield response
         finally:
-            await self._release_parse_slot(rate_limit_key)
+            await self._release_parse_slot(parse_guard_key)
         return
