@@ -3,7 +3,7 @@ import json
 import re
 import time
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, MutableSet, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, MutableSet, Optional, Tuple
 
 from astrbot.api.event import AstrMessageEvent
 
@@ -171,7 +171,7 @@ async def check_group_level_requirement(
         if role in {"owner", "admin"}:
             return True
         if level < threshold:
-            logger_obj.info(
+            logger_obj.debug(
                 f"群成员等级不足，已跳过视频解析：群号={group_id}，用户={user_id}，当前等级={level}，要求等级={threshold}"
             )
             return False
@@ -183,6 +183,8 @@ async def check_group_level_requirement(
 
 class ParseGuard:
     """解析请求限制器：滑动窗口 + 冷却 + 可选并发拦截。"""
+
+    _PARALLEL_STALE_SEC = 10 * 60
 
     def __init__(
         self,
@@ -202,7 +204,7 @@ class ParseGuard:
 
         self._records: Dict[str, Deque[float]] = {}
         self._cooldown_until: Dict[str, float] = {}
-        self._inflight: Set[str] = set()
+        self._inflight: Dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     async def acquire(self, key: Optional[str], platform: str) -> Tuple[bool, Optional[str]]:
@@ -221,8 +223,17 @@ class ParseGuard:
             self._cooldown_until.pop(key, None)
 
             if self.block_parallel and key in self._inflight:
-                self.logger.info(f"[解析限制] 已拦截{platform}解析请求：用户({key})存在进行中的解析任务")
-                return False, None
+                inflight_since = float(self._inflight.get(key, now))
+                inflight_age = now - inflight_since
+                if inflight_age >= self._PARALLEL_STALE_SEC:
+                    self._inflight.pop(key, None)
+                    self.logger.warning(
+                        f"[解析限制] 检测到{platform}解析状态超时，已重置并放行："
+                        f"用户({key})上次进行中状态已持续 {int(inflight_age)}s"
+                    )
+                else:
+                    self.logger.info(f"[解析限制] 已拦截{platform}解析请求：用户({key})存在进行中的解析任务")
+                    return False, None
 
             history = self._records.setdefault(key, deque())
             cutoff = now - self.window_sec
@@ -239,11 +250,11 @@ class ParseGuard:
 
             history.append(now)
             if self.block_parallel:
-                self._inflight.add(key)
+                self._inflight[key] = now
             return True, key
 
     async def release(self, key: Optional[str]) -> None:
         if not key:
             return
         async with self._lock:
-            self._inflight.discard(key)
+            self._inflight.pop(key, None)
