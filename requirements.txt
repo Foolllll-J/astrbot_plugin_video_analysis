@@ -3,3 +3,6 @@ qrcode>=8.0
 gmssl==3.2.2
 aiofiles>=0.8.0
 PyYAML==6.0.1
+rich
+browser-cookie3
+importlib-resources
