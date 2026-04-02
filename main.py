@@ -15,7 +15,14 @@ from .modules.bili_get import (
     process_bili_video, REG_B23, REG_BV, REG_AV, av2bv, parse_b23, parse_video,
     estimate_size, init_bili_module, bili_login, check_cookie_valid, UnsupportedBiliLinkError
 )
-from .modules.douyin_get import process_douyin_video 
+from .modules.douyin_get import (
+    process_douyin_video,
+    init_douyin_login,
+    load_douyin_cookies,
+    check_douyin_cookie_valid,
+    get_effective_douyin_cookie,
+    format_douyin_failure_message,
+)
 from .modules.auto_delete import delete_old_files
 from .modules.parse_guard import (
     ParseGuard,
@@ -23,7 +30,7 @@ from .modules.parse_guard import (
     contains_blocked_keyword,
 )
 
-MAX_PROCESS_RETRIES = 0
+MAX_DOUYIN_PROCESS_RETRIES = 1
 MAX_SEND_RETRIES = 2
 
 async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
@@ -52,7 +59,9 @@ class videoAnalysis(Star):
         self.bili_quality = bili_config.get("quality", 64)
         self.bili_use_login = bili_config.get("use_login", False)
         self.bili_smart_downgrade = bili_config.get("smart_downgrade", True)
-        self.douyin_cookie = douyin_config.get("cookie", None)
+        self._douyin_cookie_from_config = douyin_config.get("cookie", "") or ""
+        self._douyin_cookie_from_file = ""
+        self._douyin_cookie_loaded = False
         self.douyin_api_url = douyin_config.get("api_url", "")
         self.douyin_max_images = douyin_config.get("max_images", 20)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
@@ -83,6 +92,7 @@ class videoAnalysis(Star):
         # 初始化 bili_get 模块
         cookie_file = os.path.join(self.data_dir, "bili_cookies.json")
         init_bili_module(cookie_file)
+        init_douyin_login(self.data_dir)
 
     def _build_parse_throttle_key(self, event: AstrMessageEvent):
         """限频作用域固定为群聊成员：group_id + sender_id"""
@@ -373,14 +383,20 @@ class videoAnalysis(Star):
         download_dir = os.path.join(self.download_dir, "douyin")
         result = None
 
-        for attempt in range(MAX_PROCESS_RETRIES + 1):
+        for attempt in range(MAX_DOUYIN_PROCESS_RETRIES + 1):
             try:
-                logger.debug(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_PROCESS_RETRIES + 1})")
+                logger.debug(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_DOUYIN_PROCESS_RETRIES + 1})")
                 
-                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=self.douyin_cookie, max_images=self.douyin_max_images) 
+                cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
+                    cookie_loaded=self._douyin_cookie_loaded,
+                    cookie_from_config=self._douyin_cookie_from_config,
+                    cookie_from_file=self._douyin_cookie_from_file,
+                    loader=load_douyin_cookies,
+                )
+                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=cookie, max_images=self.douyin_max_images) 
                 
                 if not result:
-                    if attempt < MAX_PROCESS_RETRIES: await asyncio.sleep(3); continue
+                    if attempt < MAX_DOUYIN_PROCESS_RETRIES: await asyncio.sleep(3); continue
                     else: logger.error("process_douyin_video 连续返回空值，最终失败.")
                 
                 # 检查是否是多媒体类型（图片或多视频）
@@ -398,13 +414,13 @@ class videoAnalysis(Star):
                 if result and result.get("video_path") and os.path.exists(result["video_path"]):
                     logger.debug(f"第 {attempt + 1} 次尝试成功，文件已找到。")
                     break 
-                if attempt < MAX_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.")
+                if attempt < MAX_DOUYIN_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.")
                 
             except Exception as e:
-                if attempt < MAX_PROCESS_RETRIES: logger.error(f"第 {attempt + 1} 次尝试失败，发生异常: {e}. 等待后重试...", exc_info=False)
+                if attempt < MAX_DOUYIN_PROCESS_RETRIES: logger.error(f"第 {attempt + 1} 次尝试失败，发生异常: {e}. 等待后重试...", exc_info=False)
                 else: logger.error(f"第 {attempt + 1} 次尝试失败，发生致命异常: {e}", exc_info=True)
             
-            if attempt == MAX_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_PROCESS_RETRIES + 1} 次)，最终失败.")
+            if attempt == MAX_DOUYIN_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_DOUYIN_PROCESS_RETRIES + 1} 次)，最终失败.")
             await asyncio.sleep(2)
         
         # 处理多媒体类型
@@ -419,7 +435,7 @@ class videoAnalysis(Star):
 
         # 处理失败情况
         else:
-            yield event.plain_result("抱歉，由于网络或解析问题，无法完成抖音视频处理。")
+            yield event.plain_result(format_douyin_failure_message(result))
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
 
@@ -617,6 +633,26 @@ class videoAnalysis(Star):
         else:
             yield event.plain_result("❌ B站 Cookie 无效或不存在，请使用 /bili_login 登录")
 
+    @filter.command("dy_check")
+    async def handle_douyin_check(self, event: AstrMessageEvent):
+        """
+        检查 抖音 Cookie 是否有效
+        """
+        logger.info("收到抖音 Cookie 检查指令")
+
+        cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
+            cookie_loaded=self._douyin_cookie_loaded,
+            cookie_from_config=self._douyin_cookie_from_config,
+            cookie_from_file=self._douyin_cookie_from_file,
+            loader=load_douyin_cookies,
+        )
+        is_valid = await check_douyin_cookie_valid(cookie)
+
+        if is_valid:
+            yield event.plain_result("✅ 抖音 Cookie 有效")
+        else:
+            yield event.plain_result("❌ 抖音 Cookie 无效或不存在，请更新插件配置中的抖音 Cookie")
+
 
 @filter.event_message_type(EventMessageType.ALL)
 async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *args, **kwargs):
@@ -673,7 +709,13 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             return
 
         # 检查是否配置了 API 地址或 Cookie
-        if not self.douyin_api_url and not self.douyin_cookie:
+        cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
+            cookie_loaded=self._douyin_cookie_loaded,
+            cookie_from_config=self._douyin_cookie_from_config,
+            cookie_from_file=self._douyin_cookie_from_file,
+            loader=load_douyin_cookies,
+        )
+        if not self.douyin_api_url and not cookie:
             logger.warning("成功匹配到抖音链接，但 douyin_api_url 和 douyin_cookie 均未配置，跳过解析。")
             return
             
