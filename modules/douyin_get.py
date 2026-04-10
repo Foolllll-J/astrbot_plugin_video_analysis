@@ -144,56 +144,23 @@ async def get_effective_douyin_cookie(
 
 
 def format_douyin_failure_message(result: dict | None) -> str:
+    user_message = "抱歉，抖音解析失败。"
+
     if not result:
-        return "抱歉，由于网络或解析异常，无法完成抖音内容处理。"
+        logger.error("Douyin 解析失败: empty result")
+        return user_message
 
     failures = result.get("failure_info") or []
-    if not failures:
-        return result.get("error") or "抱歉，抖音解析失败。"
+    error_message = result.get("error") or "unknown error"
 
-    lines = ["抱歉，抖音解析失败。"]
-
-    local_failure = next(
-        (item for item in failures if item.get("stage") == "local"), None
-    )
-    api_video_failure = next(
-        (item for item in failures if item.get("stage") == "api_video_data"), None
-    )
-    api_download_failure = next(
-        (item for item in failures if item.get("stage") == "api_download"), None
-    )
-    config_failure = next(
-        (item for item in failures if item.get("stage") == "config"), None
-    )
-
-    if local_failure:
-        if local_failure.get("reason") == "cookie_expired":
-            lines.append(
-                "本地解析：Cookie 可能已失效或请求被抖音拦截，请更新插件配置中的抖音 Cookie。"
-            )
-        elif local_failure.get("reason") == "aweme_id_extract_failed":
-            lines.append(
-                "本地解析：无法展开分享短链，链接可能已失效，或当前网络无法访问抖音。"
-            )
-        else:
-            lines.append(f"本地解析：{local_failure.get('message', '失败')}")
-
-    if api_video_failure:
-        lines.append(
-            f"API 兜底(video_data)：{api_video_failure.get('message', '失败')}"
+    if failures:
+        logger.error(
+            f"Douyin 解析失败详情: error={error_message}, failures={json.dumps(failures, ensure_ascii=False)}"
         )
+    else:
+        logger.error(f"Douyin 解析失败详情: error={error_message}")
 
-    if api_download_failure:
-        lines.append(
-            f"API 兜底(download)：{api_download_failure.get('message', '失败')}"
-        )
-
-    if config_failure and len(lines) == 1:
-        lines.append(
-            config_failure.get("message", "当前未配置可用的抖音解析方式。")
-        )
-
-    return "\n".join(lines)
+    return user_message
 
 
 async def check_douyin_cookie_valid(cookie_string: str | None = None) -> bool:
