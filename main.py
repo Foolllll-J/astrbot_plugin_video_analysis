@@ -17,6 +17,7 @@ from .modules.bili_get import (
 )
 from .modules.douyin_get import (
     process_douyin_video,
+    fetch_douyin_metadata,
     init_douyin_login,
     load_douyin_cookies,
     check_douyin_cookie_valid,
@@ -27,7 +28,7 @@ from .modules.auto_delete import delete_old_files
 from .modules.parse_guard import (
     ParseGuard,
     check_group_level_requirement,
-    contains_blocked_keyword,
+    contains_blocked_keyword_in_title,
 )
 
 MAX_DOUYIN_PROCESS_RETRIES = 1
@@ -54,17 +55,18 @@ class videoAnalysis(Star):
         self.nap_server_address = config.get("nap_server_address", "localhost")
         self.nap_server_port = config.get("nap_server_port", 3658)
         self.session_whitelist: List[str] = [str(sid) for sid in config.get("session_whitelist", []) if str(sid).strip()]
-        self.delete_time = config.get("delete_time", 60)    
+        self.delete_time = config.get("delete_time", 60)
         self.max_video_size = config.get("max_video_size", 200)
         self.bili_quality = bili_config.get("quality", 64)
         self.bili_use_login = bili_config.get("use_login", False)
-        self.bili_smart_downgrade = bili_config.get("smart_downgrade", True)
+        self.smart_downgrade = config.get("smart_downgrade", True)
         self._douyin_cookie_from_config = douyin_config.get("cookie", "") or ""
         self._douyin_cookie_from_file = ""
         self._douyin_cookie_loaded = False
         self.douyin_api_url = douyin_config.get("api_url", "")
         self.douyin_max_images = douyin_config.get("max_images", 20)
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
+        self.max_duration = max(0, int(parse_throttle_config.get("max_duration", 0)))
         self.blocked_keywords: List[str] = [str(kw).strip() for kw in parse_throttle_config.get("blocked_keywords", []) if str(kw).strip()]
 
         self.parse_throttle_window_sec = max(0, int(parse_throttle_config.get("window_sec", 0)))
@@ -162,7 +164,33 @@ class videoAnalysis(Star):
             )
         except Exception as e:
             logger.warning(f"{'设置' if set_val else '取消'}表情回应失败 (emoji_id: {emoji_id}): {e}")
-        
+
+    async def _check_pre_conditions(
+        self,
+        event: AstrMessageEvent,
+        title: str,
+        duration: float = 0,
+        is_video: bool = False,
+    ) -> bool:
+        """
+        统一的前置条件检查：屏蔽词 + 时长限制。
+
+        返回 True 表示拦截，返回 False 表示放行。
+        """
+        # 拦截规则 1：屏蔽词
+        if contains_blocked_keyword_in_title(title, self.blocked_keywords, logger):
+            logger.info(f"视频「{title}」命中屏蔽词，拦截解析。")
+            await self._set_emoji(event, 123)
+            return True
+
+        # 拦截规则 2：时长限制（仅对视频类型生效）
+        if is_video and self.max_duration > 0 and duration > self.max_duration:
+            logger.info(f"视频时长 {duration}s 超出限制 {self.max_duration}s，拦截解析。")
+            await self._set_emoji(event, 325)
+            return True
+
+        return False
+
     async def _process_and_send(self, event: AstrMessageEvent, result: dict, platform: str):
         """
         统一的消息发送逻辑，处理组件构建、重试、清理。
@@ -176,38 +204,39 @@ class videoAnalysis(Star):
         # 0. 检查文件是否存在
         if not (file_path_rel and os.path.exists(file_path_rel)):
             error_msg = result.get("error") if result else None
-            
+
             if error_msg:
                 logger.error(f"process_bili_video/douyin_video 失败: {error_msg}")
-                if "尚不支持 DASH 格式" in error_msg:
-                    user_msg = "抱歉，该视频暂不支持 DASH 格式下载。"
-                else:
-                    user_msg = f"抱歉，视频处理失败: {error_msg}"
+                if not self.enable_emoji_reaction:
+                    if "尚不支持 DASH 格式" in error_msg:
+                        message_to_send = [Plain("抱歉，该视频暂不支持 DASH 格式下载。")]
+                    else:
+                        message_to_send = [Plain(f"抱歉，视频处理失败: {error_msg}")]
             else:
                 logger.error(f"process_bili_video/douyin_video 返回: {result}，文件路径无效或文件不存在: {file_path_rel}")
-                user_msg = "抱歉，由于网络或解析问题，无法获取视频文件。"
-                
-            message_to_send = [Plain(user_msg)]
+                if not self.enable_emoji_reaction:
+                    message_to_send = [Plain("抱歉，由于网络或解析问题，无法获取视频文件。")]
+
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
+            return
         else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             logger.debug(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
 
             # 1. 判断是否超出大小限制
             if file_size_mb > self.max_video_size:
-                # 视频过大，不发送视频，只回复文本消息
-                message_to_send = [Plain(f"抱歉，该视频文件大小为 {file_size_mb:.2f}MB，超过了 {self.max_video_size}MB 的最大限制，无法发送视频消息。")]
-                logger.warning(f"视频大小超出限制，将回复文本消息。")
-                await self._set_emoji(event, 424, False)
-                await self._set_emoji(event, 357)
+                logger.warning(f"视频大小超出限制。文件: {file_path_rel}，大小: {file_size_mb:.2f}MB，最大限制: {self.max_video_size}MB。")
+                result["error"] = "video_size_exceeded"
+                result["file_size_mb"] = file_size_mb
+                if not self.enable_emoji_reaction:
+                    message_to_send = [Plain(f"抱歉，视频大小 {file_size_mb:.2f}MB 超出限制 {self.max_video_size}MB，无法发送。")]
             else:
                 # 视频在限制内，构建视频组件
                 nap_file_path = await self._send_file_if_needed(file_path_rel) 
                 
                 media_component = Comp.Video.fromFileSystem(path = nap_file_path)
                 message_to_send = [media_component]
-                logger.debug(f"视频在大小限制内，构建 Video 组件。")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 124)
 
@@ -226,16 +255,19 @@ class videoAnalysis(Star):
                         await asyncio.sleep(2)
                     else:
                         logger.error(f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}", exc_info=True)
-                        # 如果是发送文本失败，回复警告文本
-                        yield event.plain_result("警告：消息发送失败，请稍后重试。")
+                        if not self.enable_emoji_reaction:
+                            yield event.plain_result("警告：消息发送失败，请稍后重试。")
                         await self._set_emoji(event, 424, False)
                         await self._set_emoji(event, 357)
                         return
         else:
-            # 如果因其他原因导致 message_to_send 为空
-            logger.error("未找到有效的文件 or 消息组件，跳过发送。")
+            emoji_id = 357
+            if result and result.get("error") == "video_size_exceeded":
+                emoji_id = 325
+            else:
+                logger.error(f"未找到有效的文件或消息组件，跳过发送。")
             await self._set_emoji(event, 424, False)
-            await self._set_emoji(event, 357)
+            await self._set_emoji(event, emoji_id)
             return
 
         # 4. 文件清理
@@ -280,21 +312,28 @@ class videoAnalysis(Star):
             return
     
         if not video_info:
-            yield event.plain_result("抱歉，无法解析视频信息，无法进行下载。请稍后重试。")
+            logger.error("无法解析 Bilibili 视频信息。")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result("抱歉，无法解析视频信息，无法进行下载。请稍后重试。")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
-    
+
+        # 前置条件检查：屏蔽词 + 时长限制
+        video_title = video_info.get("title", "")
+        video_duration = video_info.get("duration", 0)
+        if await self._check_pre_conditions(event, video_title, video_duration, is_video=True):
+            return  # 被拦截，直接结束
+
+        # 通过检查，贴上正在解析的表情
         await self._set_emoji(event, 424)
-    
-        duration = video_info.get("duration", 0)
-    
+
         # 步骤 2：智能预估起始清晰度（不使用固定降级次数上限）
         target_quality = initial_quality
-        if self.bili_smart_downgrade and duration > 0:
+        if self.smart_downgrade and video_duration > 0:
             temp_quality = initial_quality
             while temp_quality >= 16:
-                estimated_size_mb = estimate_size(temp_quality, duration)
+                estimated_size_mb = estimate_size(temp_quality, video_duration)
                 if estimated_size_mb <= max_size:
                     break
                 next_q = DOWNGRADE_MAP.get(temp_quality)
@@ -303,7 +342,7 @@ class videoAnalysis(Star):
                 temp_quality = next_q
             target_quality = temp_quality
             logger.debug(
-                f"智能预估：视频时长 {duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。"
+                f"智能预估：视频时长 {video_duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。"
             )
     
         current_quality = target_quality
@@ -378,64 +417,122 @@ class videoAnalysis(Star):
     
     async def _handle_douyin_parsing(self, event: AstrMessageEvent, url: str):
         """
-        抖音解析和下载核心逻辑
+        抖音解析和下载核心逻辑。
         """
         download_dir = os.path.join(self.download_dir, "douyin")
-        result = None
 
+        # 获取 Cookie（用于本地解析）
+        cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
+            cookie_loaded=self._douyin_cookie_loaded,
+            cookie_from_config=self._douyin_cookie_from_config,
+            cookie_from_file=self._douyin_cookie_from_file,
+            loader=load_douyin_cookies,
+        )
+
+        # 步骤 1：获取元数据
+        metadata = await fetch_douyin_metadata(
+            url,
+            api_url=self.douyin_api_url,
+            cookie=cookie,
+        )
+
+        if not metadata:
+            logger.error("抖音元数据获取失败。")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result("抱歉，无法获取视频信息，请稍后重试。")
+            await self._set_emoji(event, 357)
+            return
+
+        # 步骤 2：前置条件检查
+        meta_title = metadata.get("title", "抖音作品")
+        meta_duration = metadata.get("duration", 0)
+        meta_type = metadata.get("type", "unknown")
+        is_video = meta_type == "video"
+
+        if await self._check_pre_conditions(event, meta_title, meta_duration, is_video=is_video):
+            return  # 被拦截，直接结束
+
+        # 步骤 3：通过检查，贴上正在解析的表情
+        await self._set_emoji(event, 424)
+
+        # 步骤 4：开始下载（复用预取数据避免重复解析）
+        result = None
         for attempt in range(MAX_DOUYIN_PROCESS_RETRIES + 1):
             try:
                 logger.debug(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_DOUYIN_PROCESS_RETRIES + 1})")
-                
-                cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
-                    cookie_loaded=self._douyin_cookie_loaded,
-                    cookie_from_config=self._douyin_cookie_from_config,
-                    cookie_from_file=self._douyin_cookie_from_file,
-                    loader=load_douyin_cookies,
+
+                result = await process_douyin_video(
+                    url,
+                    download_dir=download_dir,
+                    api_url=self.douyin_api_url,
+                    cookie=cookie,
+                    max_images=self.douyin_max_images,
+                    max_size=self.max_video_size,
+                    smart_downgrade=self.smart_downgrade,
+                    prefetched_data=metadata.get("prefetched_data"),
+                    prefetch_source=metadata.get("prefetch_source"),
                 )
-                result = await process_douyin_video(url, download_dir=download_dir, api_url=self.douyin_api_url, cookie=cookie, max_images=self.douyin_max_images) 
-                
+
                 if not result:
-                    if attempt < MAX_DOUYIN_PROCESS_RETRIES: await asyncio.sleep(3); continue
-                    else: logger.error("process_douyin_video 连续返回空值，最终失败.")
-                
+                    if attempt < MAX_DOUYIN_PROCESS_RETRIES:
+                        await asyncio.sleep(3)
+                        continue
+                    else:
+                        logger.error("process_douyin_video 连续返回空值，最终失败。")
+
                 # 检查是否是多媒体类型（图片或多视频）
                 if result.get("type") in ["image", "images", "multi_video"]:
                     has_media = (
-                        result.get("image_paths") or 
-                        result.get("video_paths") or 
+                        result.get("image_paths") or
+                        result.get("video_paths") or
                         result.get("ordered_media")
                     )
                     if has_media:
-                        logger.debug(f"第 {attempt + 1} 次尝试成功，获取到 {len(result.get('ordered_media', []) or result.get('image_paths', []) or result.get('video_paths', []))} 个媒体文件。")
+                        logger.debug(f"第 {attempt + 1} 次尝试成功，获取到媒体文件。")
                         break
-                
+
                 # 检查文件是否存在（单视频）
                 if result and result.get("video_path") and os.path.exists(result["video_path"]):
                     logger.debug(f"第 {attempt + 1} 次尝试成功，文件已找到。")
-                    break 
-                if attempt < MAX_DOUYIN_PROCESS_RETRIES: logger.warning("下载/合成失败，文件未找到。进行重试.")
-                
+                    break
+                if attempt < MAX_DOUYIN_PROCESS_RETRIES:
+                    logger.warning("下载/合成失败，文件未找到。进行重试。")
+
             except Exception as e:
-                if attempt < MAX_DOUYIN_PROCESS_RETRIES: logger.error(f"第 {attempt + 1} 次尝试失败，发生异常: {e}. 等待后重试...", exc_info=False)
-                else: logger.error(f"第 {attempt + 1} 次尝试失败，发生致命异常: {e}", exc_info=True)
-            
-            if attempt == MAX_DOUYIN_PROCESS_RETRIES: logger.error(f"核心处理达到最大重试次数 ({MAX_DOUYIN_PROCESS_RETRIES + 1} 次)，最终失败.")
+                if attempt < MAX_DOUYIN_PROCESS_RETRIES:
+                    logger.error(f"第 {attempt + 1} 次尝试失败，发生异常: {e}. 等待后重试...", exc_info=False)
+                else:
+                    logger.error(f"第 {attempt + 1} 次尝试失败，发生致命异常: {e}", exc_info=True)
+
+            if attempt == MAX_DOUYIN_PROCESS_RETRIES:
+                logger.error(f"核心处理达到最大重试次数 ({MAX_DOUYIN_PROCESS_RETRIES + 1} 次)，最终失败。")
             await asyncio.sleep(2)
-        
+
+        # 检查结果的有效性
+        if not result:
+            logger.error("抖音解析失败或结果无效。")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result(format_douyin_failure_message(result))
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357)
+            return
+
         # 处理多媒体类型
-        if result and (result.get("type") in ["image", "images", "multi_video"]):
+        result_type = result.get("type", "")
+        if result_type in ["image", "images", "multi_video"]:
             async for response in self._send_douyin_multimedia(event, result):
                 yield response
-        
+
         # 处理单视频类型
-        elif result and result.get("video_path") and os.path.exists(result["video_path"]):
+        elif result.get("video_path") and os.path.exists(result["video_path"]):
             async for response in self._process_and_send(event, result, 'douyin'):
                 yield response
 
         # 处理失败情况
         else:
-            yield event.plain_result(format_douyin_failure_message(result))
+            logger.error("抖音解析失败或结果无效。")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result(format_douyin_failure_message(result))
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
 
@@ -456,7 +553,8 @@ class videoAnalysis(Star):
         
         if not ordered_media:
             logger.error("没有找到媒体文件")
-            yield event.plain_result("抱歉，没有找到媒体文件。")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result("抱歉，没有找到媒体文件。")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
@@ -465,7 +563,9 @@ class videoAnalysis(Star):
             item = ordered_media[0]
             media_path = item["path"]
             if not os.path.exists(media_path):
-                yield event.plain_result("抱歉，媒体文件不存在。")
+                logger.error(f"媒体文件不存在: {media_path}")
+                if not self.enable_emoji_reaction:
+                    yield event.plain_result("抱歉，媒体文件不存在。")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 357)
                 return
@@ -482,7 +582,8 @@ class videoAnalysis(Star):
                 return
             except Exception as e:
                 logger.error(f"直接发送单个媒体失败: {e}", exc_info=True)
-                yield event.plain_result(f"发送失败: {str(e)}")
+                if not self.enable_emoji_reaction:
+                    yield event.plain_result(f"发送失败: {str(e)}")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 357)
                 return
@@ -512,7 +613,9 @@ class videoAnalysis(Star):
                     logger.error(f"降级发送第 {idx} 个媒体 ({media_type}) 失败: {e}", exc_info=True)
 
             if success_count == 0:
-                yield event.plain_result("抱歉，当前平台暂不支持该多媒体发送方式。")
+                logger.error("降级逐条发送全部失败")
+                if not self.enable_emoji_reaction:
+                    yield event.plain_result("抱歉，当前平台暂不支持该多媒体发送方式。")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 357)
                 return
@@ -546,7 +649,9 @@ class videoAnalysis(Star):
                 logger.error(f"处理第 {idx} 个媒体 ({media_type}) 时出错: {e}", exc_info=True)
         
         if len(forward_nodes) == 0:
-            yield event.plain_result("抱歉，无法加载媒体文件。")
+            logger.error("无法加载媒体文件（合并转发构建为空）")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result("抱歉，无法加载媒体文件。")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
@@ -560,7 +665,8 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 124)
         except Exception as e:
             logger.error(f"发送合并转发消息失败: {e}", exc_info=True)
-            yield event.plain_result(f"内容发送失败: {str(e)}")
+            if not self.enable_emoji_reaction:
+                yield event.plain_result(f"内容发送失败: {str(e)}")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
 
@@ -675,9 +781,6 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         match_bili_json = re.search(r"https:\\\\/\\\\/(?:b23\.tv|bili2233\.cn)\\\\/[a-zA-Z0-9]+", message_obj_str)
     
     if match_bili or match_bili_json:
-        if contains_blocked_keyword(event, self.blocked_keywords, logger):
-            return
-
         if match_bili:
             url = match_bili.group(1)
         else:
@@ -705,9 +808,6 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
     match_douyin = re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
 
     if match_douyin:
-        if contains_blocked_keyword(event, self.blocked_keywords, logger):
-            return
-
         # 检查是否配置了 API 地址或 Cookie
         cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
             cookie_loaded=self._douyin_cookie_loaded,
@@ -731,9 +831,6 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
                 return
 
         try:
-            # 触发开始解析表情回应
-            await self._set_emoji(event, 424)
-
             # 调用抖音处理函数
             async for response in self._handle_douyin_parsing(event, url):
                 yield response

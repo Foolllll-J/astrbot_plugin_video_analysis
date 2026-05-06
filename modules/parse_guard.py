@@ -1,9 +1,7 @@
 import asyncio
-import json
-import re
 import time
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, MutableSet, Optional, Tuple
+from typing import Deque, Dict, Iterable, MutableSet, Optional, Tuple
 
 from astrbot.api.event import AstrMessageEvent
 
@@ -23,115 +21,20 @@ def is_qq_platform(event: AstrMessageEvent) -> bool:
     return False
 
 
-def extract_json_descriptive_text(json_payload: Any) -> str:
-    """从 JSON 消息中提取适合做关键词检测的描述性文本。"""
-    descriptive_keys = {
-        "title",
-        "desc",
-        "description",
-        "prompt",
-        "content",
-        "text",
-        "brief",
-        "summary",
-        "subtitle",
-    }
-    ignored_keys = {
-        "app",
-        "appid",
-        "app_type",
-        "bizsrc",
-        "config",
-        "ctime",
-        "extra",
-        "jumpUrl",
-        "preview",
-        "tagIcon",
-        "token",
-        "uin",
-        "ver",
-        "view",
-    }
-    texts = []
-    seen = set()
-
-    def _append_text(value: Any):
-        text = str(value).strip()
-        if not text or text in seen:
-            return
-        if re.match(r"^https?://", text, flags=re.IGNORECASE):
-            return
-        if text.isdigit():
-            return
-        if re.fullmatch(r"[A-Za-z0-9_\-=:/.]{16,}", text):
-            return
-        seen.add(text)
-        texts.append(text)
-
-    def _walk(node: Any, parent_key: str = ""):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                key_text = str(key).strip()
-                if key_text in ignored_keys:
-                    continue
-                if key_text in descriptive_keys and not isinstance(value, (dict, list)):
-                    _append_text(value)
-                    continue
-                _walk(value, key_text)
-            return
-        if isinstance(node, list):
-            for item in node:
-                _walk(item, parent_key)
-            return
-        if parent_key in descriptive_keys:
-            _append_text(node)
-
-    parsed_payload = json_payload
-    if isinstance(json_payload, str):
-        raw_text = json_payload.strip()
-        if not raw_text:
-            return ""
-        try:
-            parsed_payload = json.loads(raw_text)
-        except json.JSONDecodeError:
-            return raw_text
-
-    _walk(parsed_payload)
-    return " ".join(texts)
-
-
-def build_keyword_check_text(event: AstrMessageEvent) -> str:
-    """拼接消息文本与 JSON 卡片中的描述性内容，用于屏蔽关键词检测。"""
-    content_parts = [event.message_str or ""]
-    for msg_seg in event.get_messages() or []:
-        seg_type = getattr(getattr(msg_seg, "type", None), "name", None) or msg_seg.__class__.__name__
-        if seg_type != "Json":
-            continue
-        json_data = getattr(msg_seg, "data", "{}")
-        descriptive_text = extract_json_descriptive_text(json_data)
-        if descriptive_text:
-            content_parts.append(descriptive_text)
-    return " ".join(part for part in content_parts if part).strip()
-
-
-def contains_blocked_keyword(
-    event: AstrMessageEvent,
+def contains_blocked_keyword_in_title(
+    title: str,
     blocked_keywords: Iterable[str],
     logger_obj=None,
 ) -> bool:
-    """检查消息文本与 JSON 关键信息是否命中屏蔽关键词。"""
+    """检查视频标题是否命中屏蔽关键词。"""
     normalized_keywords = [str(keyword).strip() for keyword in blocked_keywords if str(keyword).strip()]
-    if not normalized_keywords:
-        return False
-
-    text_to_check = build_keyword_check_text(event)
-    if not text_to_check:
+    if not normalized_keywords or not title:
         return False
 
     for keyword in normalized_keywords:
-        if keyword in text_to_check:
+        if keyword in title:
             if logger_obj:
-                logger_obj.info(f"消息命中解析屏蔽关键词，已跳过视频解析：关键词={keyword}")
+                logger_obj.debug(f"视频标题命中解析屏蔽关键词，已跳过下载：关键词={keyword}，标题={title}")
             return True
     return False
 

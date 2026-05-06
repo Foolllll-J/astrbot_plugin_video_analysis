@@ -38,6 +38,12 @@
         "type": "bool",
         "default": true
     },
+    "smart_downgrade": {
+        "description": "清晰度智能降级",
+        "hint": "开启后，长视频将自动降级清晰度，以避免超出视频大小限制。",
+        "type": "bool",
+        "default": true
+    },
     "bilibili": {
         "type": "object",
         "description": "B站解析配置",
@@ -62,12 +68,6 @@
                     112,
                     120
                 ]
-            },
-            "smart_downgrade": {
-                "description": "清晰度智能降级",
-                "hint": "开启后，长视频将自动降级清晰度，以避免超出视频大小限制。",
-                "type": "bool",
-                "default": true
             }
         }
     },
@@ -119,12 +119,18 @@
             },
             "blocked_keywords": {
                 "description": "解析屏蔽关键词",
-                "hint": "若消息文本或 JSON 卡片的标题/描述等关键信息中包含这些关键词，则不会触发解析。",
+                "hint": "若视频标题中包含这些关键词，则不会触发解析。",
                 "type": "list",
                 "items": {
                     "type": "string"
                 },
                 "default": []
+            },
+            "max_duration": {
+                "description": "最大视频时长（秒）",
+                "hint": "超过此时长的视频将不进行解析下载。设为 0 表示不限制。",
+                "type": "int",
+                "default": 0
             },
             "window_sec": {
                 "description": "统计窗口（秒）",
