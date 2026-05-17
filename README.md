@@ -32,8 +32,6 @@
 
 - **`/bili_login`** - 触发 B站账号登录流程，接收二维码图片进行扫码登录
 - **`/bili_check`** - 检查当前 B站 Cookie 是否有效
-- **`/dy_check`** - 检查当前抖音 Cookie 是否有效
-
 ---
 
 ## 🚀 安装
@@ -45,7 +43,7 @@
 docker exec -it [你的容器ID或名称] /bin/bash
 
 # 2. 安装 FFmpeg
-apt-get update && apt-get install ffmpeg-y
+apt-get update && apt-get install ffmpeg -y
 
 # 3. 安装 ppix
 pip install pipx

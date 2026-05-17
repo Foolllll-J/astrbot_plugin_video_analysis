@@ -20,7 +20,6 @@ from .modules.douyin_get import (
     fetch_douyin_metadata,
     init_douyin_login,
     load_douyin_cookies,
-    check_douyin_cookie_valid,
     get_effective_douyin_cookie,
     format_douyin_failure_message,
 )
@@ -738,26 +737,6 @@ class videoAnalysis(Star):
             yield event.plain_result("✅ B站 Cookie 有效")
         else:
             yield event.plain_result("❌ B站 Cookie 无效或不存在，请使用 /bili_login 登录")
-
-    @filter.command("dy_check")
-    async def handle_douyin_check(self, event: AstrMessageEvent):
-        """
-        检查 抖音 Cookie 是否有效
-        """
-        logger.info("收到抖音 Cookie 检查指令")
-
-        cookie, self._douyin_cookie_loaded, self._douyin_cookie_from_file = await get_effective_douyin_cookie(
-            cookie_loaded=self._douyin_cookie_loaded,
-            cookie_from_config=self._douyin_cookie_from_config,
-            cookie_from_file=self._douyin_cookie_from_file,
-            loader=load_douyin_cookies,
-        )
-        is_valid = await check_douyin_cookie_valid(cookie)
-
-        if is_valid:
-            yield event.plain_result("✅ 抖音 Cookie 有效")
-        else:
-            yield event.plain_result("❌ 抖音 Cookie 无效或不存在，请更新插件配置中的抖音 Cookie")
 
 
 @filter.event_message_type(EventMessageType.ALL)

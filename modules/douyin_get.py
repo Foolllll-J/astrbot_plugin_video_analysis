@@ -174,48 +174,6 @@ def format_douyin_failure_message(result: dict | None) -> str:
     return user_message
 
 
-async def check_douyin_cookie_valid(cookie_string: str | None = None) -> bool:
-    cookie_string = cookie_string or await load_douyin_cookies()
-    if not cookie_string:
-        return False
-
-    _, is_valid, _ = extract_douyin_cookies(cookie_string)
-    if not is_valid:
-        logger.debug("抖音 Cookie 缺少关键字段")
-        return False
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/133.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://www.douyin.com/",
-        "Cookie": cookie_string,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-            response = await client.get(
-                "https://www.douyin.com/aweme/v1/web/query/user/",
-                headers=headers,
-            )
-
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                except Exception:
-                    data = {}
-
-                if data.get("status_code") == 0 or "data" in data:
-                    return True
-
-            homepage = await client.get("https://www.douyin.com/", headers=headers)
-            return homepage.status_code == 200 and "sessionid" in cookie_string
-    except Exception as exc:
-        logger.debug(f"抖音 Cookie 校验异常: {type(exc).__name__}: {exc}")
-        return False
-
 def _make_failure(stage: str, reason: str, message: str, details: str = "") -> dict:
     return {
         "stage": stage,
