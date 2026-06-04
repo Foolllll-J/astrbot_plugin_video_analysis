@@ -67,6 +67,7 @@ class videoAnalysis(Star):
         self.enable_emoji_reaction = config.get("enable_emoji_reaction", True)
         self.max_duration = max(0, int(parse_throttle_config.get("max_duration", 0)))
         self.blocked_keywords: List[str] = [str(kw).strip() for kw in parse_throttle_config.get("blocked_keywords", []) if str(kw).strip()]
+        self.admin_bypass_content_restrictions = config.get("admin_bypass_content_restrictions", True)
 
         self.parse_throttle_window_sec = max(0, int(parse_throttle_config.get("window_sec", 0)))
         self.parse_throttle_max_requests = max(1, int(parse_throttle_config.get("max_requests", 2)))
@@ -176,6 +177,10 @@ class videoAnalysis(Star):
 
         返回 True 表示拦截，返回 False 表示放行。
         """
+        # 管理员跳过内容级限制
+        if self.admin_bypass_content_restrictions and self._is_admin_event(event):
+            return False
+
         # 拦截规则 1：屏蔽词
         if contains_blocked_keyword_in_title(title, self.blocked_keywords, logger):
             logger.info(f"视频「{title}」命中屏蔽词，拦截解析。")
@@ -224,7 +229,7 @@ class videoAnalysis(Star):
             logger.debug(f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。")
 
             # 1. 判断是否超出大小限制
-            if file_size_mb > self.max_video_size:
+            if not (self.admin_bypass_content_restrictions and self._is_admin_event(event)) and file_size_mb > self.max_video_size:
                 logger.warning(f"视频大小超出限制。文件: {file_path_rel}，大小: {file_size_mb:.2f}MB，最大限制: {self.max_video_size}MB。")
                 result["error"] = "video_size_exceeded"
                 result["file_size_mb"] = file_size_mb
@@ -285,6 +290,9 @@ class videoAnalysis(Star):
     
         initial_quality = self.bili_quality
         max_size = self.max_video_size
+        if self.admin_bypass_content_restrictions and self._is_admin_event(event):
+            logger.info("管理员跳过内容级限制：B站解析跳过智能降级和大小校验")
+            max_size = float('inf')
         use_login = self.bili_use_login
         videos_download = True
     
@@ -460,13 +468,19 @@ class videoAnalysis(Star):
             try:
                 logger.debug(f"尝试解析下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_DOUYIN_PROCESS_RETRIES + 1})")
 
+                # 管理员跳过内容级限制：跳过智能降级和大小校验
+                max_size = self.max_video_size
+                if self.admin_bypass_content_restrictions and self._is_admin_event(event):
+                    logger.info("管理员跳过内容级限制：抖音解析跳过智能降级和大小校验")
+                    max_size = float('inf')
+
                 result = await process_douyin_video(
                     url,
                     download_dir=download_dir,
                     api_url=self.douyin_api_url,
                     cookie=cookie,
                     max_images=self.douyin_max_images,
-                    max_size=self.max_video_size,
+                    max_size=max_size,
                     smart_downgrade=self.smart_downgrade,
                     prefetched_data=metadata.get("prefetched_data"),
                     prefetch_source=metadata.get("prefetch_source"),

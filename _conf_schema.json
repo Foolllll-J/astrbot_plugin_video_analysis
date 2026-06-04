@@ -30,7 +30,13 @@
         "description": "最大视频大小（MB）",
         "hint": "视频文件的最大允许大小，超过此限制将无法发送。",
         "type": "int",
-        "default": 100
+        "default": 200
+    },
+    "admin_bypass_content_restrictions": {
+        "description": "管理员是否跳过内容级限制",
+        "hint": "开启后，管理员不受视频时长、发送大小、屏蔽词限制。",
+        "type": "bool",
+        "default": true
     },
     "enable_emoji_reaction": {
         "description": "解析时贴表情",
