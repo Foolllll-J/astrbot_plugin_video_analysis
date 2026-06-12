@@ -104,9 +104,9 @@ def format_number(num):
     else: return f"{num/1e8:.1f}亿"
 
 def _extract_aid(raw: str) -> str | None:
-    """从 AV 标识中提取数字 aid，失败返回 None。"""
-    s = str(raw or "")
-    if not s:
+    """从 AV 标识中提取数字 aid，仅当输入匹配 av\\d+ 时返回数字部分，失败返回 None。"""
+    s = str(raw or "").strip().lower()
+    if not s.startswith("av"):
         return None
     m = re.search(r'\d+', s)
     return m.group(0) if m else None
@@ -188,8 +188,8 @@ async def parse_b23(short_url):
 
 async def parse_video(bvid):
     """解析视频信息"""
-    aid = _extract_aid(bvid)
-    if aid:
+    if REG_AV.search(str(bvid or "")):
+        aid = _extract_aid(bvid)
         api_url = API_BY_AID.format(aid)
     else:
         api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
