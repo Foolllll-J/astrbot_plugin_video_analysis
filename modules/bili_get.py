@@ -69,7 +69,7 @@ def map_quality_to_height(quality_code: int) -> int:
     if quality_code >= 16: return 16   # 360P
     return 80 # 默认 1080P
 
-# 正则表达式 and AV/BV conversion functions
+# 正则表达式 and AV/BV parsing functions
 REG_B23 = re.compile(r'(b23\.tv|bili2233\.cn)\/[\w]+')
 REG_BV = re.compile(r'BV1\w{9}')
 REG_AV = re.compile(r'av\d+', re.I)
@@ -94,11 +94,7 @@ REG_BILI_SPACE = re.compile(
 class UnsupportedBiliLinkError(Exception):
     """Bilibili link type is recognized but unsupported."""
 
-AV2BV_TABLE = 'fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF'
-AV2BV_TR = {c: i for i, c in enumerate(AV2BV_TABLE)}
-AV2BV_S = [11, 10, 3, 8, 4, 6]
-AV2BV_XOR = 177451812
-AV2BV_ADD = 8728348608
+API_BY_AID = "https://api.bilibili.com/x/web-interface/view?aid={}"
 
 def format_number(num):
     """格式化数字显示"""
@@ -107,17 +103,19 @@ def format_number(num):
     elif num < 1e8: return f"{num/1e4:.1f}万"
     else: return f"{num/1e8:.1f}亿"
 
+def _extract_aid(raw: str) -> str | None:
+    """从 AV 标识中提取数字 aid，失败返回 None。"""
+    s = str(raw or "")
+    if not s:
+        return None
+    m = re.search(r'\d+', s)
+    return m.group(0) if m else None
+
+
 def av2bv(av):
-    """AV号转BV号"""
-    av_num = re.search(r'\d+', av)
-    if not av_num: return None
-    try: x = (int(av_num.group()) ^ AV2BV_XOR) + AV2BV_ADD
-    except: return None
-    r = list('BV1 0 4 1 7  ')
-    for i in range(6):
-        idx = (x // (58**i)) % 58
-        r[AV2BV_S[i]] = AV2BV_TABLE[idx]
-    return ''.join(r).replace(' ', '0')
+    """兼容旧调用：返回 AV 标识本身，后续 parse_video 会按 aid fetch。"""
+    match = REG_AV.search(str(av or ""))
+    return match.group(0) if match else None
 
 async def bili_request(url, return_json=True):
     """发送B站API请求"""
@@ -190,12 +188,17 @@ async def parse_b23(short_url):
 
 async def parse_video(bvid):
     """解析视频信息"""
-    api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+    aid = _extract_aid(bvid)
+    if aid:
+        api_url = API_BY_AID.format(aid)
+    else:
+        api_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
     data = await bili_request(api_url)
     if data.get("code") != 0: return None
     info = data["data"]
+    bvid = info.get("bvid", bvid)
     return {"aid": info["aid"], "cid": info["cid"], "bvid": bvid, "title": info["title"], "cover": info["pic"], "duration": info["duration"], "stats": {"view": format_number(info["stat"]["view"]), "like": format_number(info["stat"]["like"]), "danmaku": format_number(info["stat"]["danmaku"]), "coin": format_number(info["stat"]["coin"]), "favorite": format_number(info["stat"]["favorite"])}}
-        
+
 async def save_cookies_dict(cookies):
     """保存Cookie到文件"""
     try:

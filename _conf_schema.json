@@ -15,9 +15,6 @@
         "description": "会话白名单",
         "hint": "留空表示所有会话都可解析。群聊填写群号，私聊填写用户 ID。",
         "type": "list",
-        "items": {
-            "type": "string"
-        },
         "default": []
     },
     "delete_time": {
