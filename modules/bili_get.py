@@ -390,6 +390,7 @@ async def download_video_yutto(bvid, cookies_file, download_dir, quality=80, num
         '--subpath-template', bvid,           # 文件名为 BVID (避免目录嵌套，仅文件名)
         '--no-danmaku',                       # 通常下载视频不需要弹幕
         '--no-subtitle',                      # 通常下载视频不需要字幕
+        '--no-cover',                         # 不嵌入封面图，避免部分QQ客户端异常
     ]
     
     logger.debug(f"yutto CMD: {' '.join(cmd)}")
@@ -470,6 +471,7 @@ async def download_video_yutto_no_login(bvid, download_dir, quality=16, num_work
         '--subpath-template', bvid,           # 文件名为 BVID
         '--no-danmaku',                       # 不下载弹幕
         '--no-subtitle',                      # 不下载字幕
+        '--no-cover',                         # 不嵌入封面图，避免部分QQ客户端异常
     ]
     
     logger.debug(f"yutto CMD (no login): {' '.join(cmd)}")
