@@ -74,6 +74,7 @@ class videoAnalysis(Star):
         self.parse_throttle_cooldown_sec = max(1, int(parse_throttle_config.get("cooldown_sec", 60)))
         self.parse_throttle_block_parallel = parse_throttle_config.get("block_parallel", True)
         self.parse_throttle_min_group_level = max(0, int(parse_throttle_config.get("min_group_level", 0)))
+        self.parse_throttle_whitelist: List[str] = [str(sid) for sid in parse_throttle_config.get("whitelist", []) if str(sid).strip()]
         self.enable_parse_throttle = self.parse_throttle_window_sec > 0
         self.parse_guard = ParseGuard(
             enable=self.enable_parse_throttle,
@@ -510,6 +511,7 @@ class videoAnalysis(Star):
                     break
                 if attempt < MAX_DOUYIN_PROCESS_RETRIES:
                     logger.warning("下载/合成失败，文件未找到。进行重试。")
+                    await asyncio.sleep(3)
 
             except Exception as e:
                 if attempt < MAX_DOUYIN_PROCESS_RETRIES:
@@ -535,6 +537,7 @@ class videoAnalysis(Star):
         if result_type in ["image", "images", "multi_video"]:
             async for response in self._send_douyin_multimedia(event, result):
                 yield response
+            return
 
         # 处理单视频类型
         elif result.get("video_path") and os.path.exists(result["video_path"]):
@@ -548,6 +551,7 @@ class videoAnalysis(Star):
                 yield event.plain_result(format_douyin_failure_message(result))
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
+            return
 
         # 统一清理文件
         download_dir_douyin = os.path.join(self.download_dir, "douyin")
@@ -686,8 +690,7 @@ class videoAnalysis(Star):
     @filter.command("bili_login")
     async def handle_bili_login(self, event: AstrMessageEvent):
         """
-        处理 B站 登录指令
-        通过聊天消息发送二维码，等待用户扫码登录。
+        发送 B站登录二维码，等待用户扫码登录
         """
         logger.info("收到 B站登录指令")
         
@@ -756,7 +759,7 @@ class videoAnalysis(Star):
 @filter.event_message_type(EventMessageType.ALL)
 async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *args, **kwargs):
     """
-    自动检测消息中是否包含分享链接，并分发给相应的处理器。
+    自动检测消息中是否包含分享链接，并分发给相应的解析器
     """
     if not self._is_session_allowed(event):
         return
@@ -766,6 +769,14 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
 
     if re.search(r"reply", message_obj_str):
         return
+
+    # 解析限制白名单检查
+    _throttle_whitelisted = False
+    if self.parse_throttle_whitelist:
+        _gid = event.get_group_id() or ""
+        _sid = event.get_sender_id() or ""
+        _throttle_whitelisted = _gid in self.parse_throttle_whitelist \
+                                or _sid in self.parse_throttle_whitelist
 
     # --- 1. 检查 Bilibili 链接 ---
     match_bili = re.search(r"(https?://b23\.tv/[\w]+|https?://bili2233\.cn/[\w]+|BV1\w{9}|av\d+)", message_str)
@@ -781,8 +792,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
             url = raw.replace("\\\\", "\\").replace("\\/", "/")
 
         parse_guard_key = None
-        if not self._is_admin_event(event):
+        if not _throttle_whitelisted and not self._is_admin_event(event):
             if not await self._check_group_level_requirement(event):
+                await self._set_emoji(event, 179)
                 return
             allowed, parse_guard_key = await self._try_acquire_parse_slot(event, "B站")
             if not allowed:
@@ -816,8 +828,9 @@ async def auto_parse_dispatcher(self: videoAnalysis, event: AstrMessageEvent, *a
         logger.info(f"成功匹配到抖音短链接：{url}")
         
         parse_guard_key = None
-        if not self._is_admin_event(event):
+        if not _throttle_whitelisted and not self._is_admin_event(event):
             if not await self._check_group_level_requirement(event):
+                await self._set_emoji(event, 179)
                 return
             allowed, parse_guard_key = await self._try_acquire_parse_slot(event, "抖音")
             if not allowed:
