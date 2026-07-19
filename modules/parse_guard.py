@@ -27,14 +27,18 @@ def contains_blocked_keyword_in_title(
     logger_obj=None,
 ) -> bool:
     """检查视频标题是否命中屏蔽关键词。"""
-    normalized_keywords = [str(keyword).strip() for keyword in blocked_keywords if str(keyword).strip()]
+    normalized_keywords = [
+        str(keyword).strip() for keyword in blocked_keywords if str(keyword).strip()
+    ]
     if not normalized_keywords or not title:
         return False
 
     for keyword in normalized_keywords:
         if keyword in title:
             if logger_obj:
-                logger_obj.debug(f"视频标题命中解析屏蔽关键词，已跳过下载：关键词={keyword}，标题={title}")
+                logger_obj.debug(
+                    f"视频标题命中解析屏蔽关键词，已跳过下载：关键词={keyword}，标题={title}"
+                )
             return True
     return False
 
@@ -54,7 +58,10 @@ async def check_group_level_requirement(
 
     if not is_qq_platform(event):
         marker = "non_qq"
-        if unsupported_logged_platforms is None or marker not in unsupported_logged_platforms:
+        if (
+            unsupported_logged_platforms is None
+            or marker not in unsupported_logged_platforms
+        ):
             if unsupported_logged_platforms is not None:
                 unsupported_logged_platforms.add(marker)
             logger_obj.debug("当前平台不支持群等级检测，已自动跳过群等级限制。")
@@ -110,7 +117,9 @@ class ParseGuard:
         self._inflight: Dict[str, float] = {}
         self._lock = asyncio.Lock()
 
-    async def acquire(self, key: Optional[str], platform: str) -> Tuple[bool, Optional[str]]:
+    async def acquire(
+        self, key: Optional[str], platform: str
+    ) -> Tuple[bool, Optional[str]]:
         if not self.enable:
             return True, None
         if not key:
@@ -121,7 +130,9 @@ class ParseGuard:
             cooldown_until = self._cooldown_until.get(key, 0.0)
             if cooldown_until > now:
                 remain = int(cooldown_until - now + 0.999)
-                self.logger.info(f"[解析限制] 已拦截{platform}解析请求：用户({key})处于冷却中，剩余 {remain}s")
+                self.logger.debug(
+                    f"[解析限制] 已拦截{platform}解析请求：用户({key})处于冷却中，剩余 {remain}s"
+                )
                 return False, None
             self._cooldown_until.pop(key, None)
 
@@ -135,7 +146,9 @@ class ParseGuard:
                         f"用户({key})上次进行中状态已持续 {int(inflight_age)}s"
                     )
                 else:
-                    self.logger.info(f"[解析限制] 已拦截{platform}解析请求：用户({key})存在进行中的解析任务")
+                    self.logger.debug(
+                        f"[解析限制] 已拦截{platform}解析请求：用户({key})存在进行中的解析任务"
+                    )
                     return False, None
 
             history = self._records.setdefault(key, deque())
@@ -145,7 +158,7 @@ class ParseGuard:
 
             if len(history) >= self.max_requests:
                 self._cooldown_until[key] = now + self.cooldown_sec
-                self.logger.info(
+                self.logger.debug(
                     f"[解析限制] 已拦截{platform}解析请求：用户({key})在 {self.window_sec}s "
                     f"内超过 {self.max_requests} 次，进入冷却 {self.cooldown_sec}s"
                 )

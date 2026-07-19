@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎬 视频解析助手
+# 🎬 媒体解析助手
 
 <i>🔮 B站抖音解析的最优方案</i>
 
@@ -12,23 +12,21 @@
 
 ## 🧾 简介
 
-一款为 [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 设计的视频平台分享链接解析插件，支持自动识别并解析 B站、抖音分享链接，智能处理视频与图片发送。
+一款为 [**AstrBot**](https://github.com/AstrBotDevs/AstrBot) 设计的多平台分享链接解析插件，支持自动识别并解析 **B站、抖音、小红书、贴吧、NGA** 的分享链接，以媒体形式智能发送视频、图片、论坛回帖等内容。
 
 ---
 
 ## ✨ 功能
 
-- **多平台支持**：支持 BiliBili (B站) 和 Douyin (抖音) 短链接的自动解析。
-- **高性能下载**：调用 **`yutto`** 命令行工具，实现高并发下载和自动 FFmpeg 合并。
+- **多平台支持**：支持 B站、抖音、小红书、贴吧、NGA 等平台链接的自动解析。
+- **论坛帖子解析**：支持贴吧和 NGA 帖子/楼层的完整解析，以合并转发形式发送回帖内容。
 - **清晰度智能降级**：可根据设置的最大视频大小来动态调整解析长视频时使用的清晰度。
 - **解析限制保护**：支持会话白名单、群等级要求、短时间限频冷却与通过屏蔽关键词跳过指定消息解析。
 - **表情回应**：通过贴表情实时反馈解析状态，支持自定义开启/关闭表情互动。
-- **便捷登录**：支持通过指令发送登录二维码，可直接扫码登录 B站账号。
-- **资源管理**：异步清理超过设定阈值的临时文件，防止占用磁盘空间。
 
 ---
 
-## 🎮 指令列表
+## 🎮 指令
 
 - **`/bili_login`** - 触发 B站账号登录流程，接收二维码图片进行扫码登录
 - **`/bili_check`** - 检查当前 B站 Cookie 是否有效
@@ -75,12 +73,15 @@ pipx install yutto
 
 ## 🙏 参考与致谢
 
-本项目在开发过程中，参考并得益于以下项目，特此感谢：
+本项目参考或得益于以下项目，特此感谢：
 
-- **原始代码参考&抖音本地解析**：[视频解析插件](https://github.com/miaoxutao123/astrbot_plugin_videos_analysis)
-- **B站解析核心**：[yutto](https://github.com/yutto-dev/yutto)
-- **抖音解析服务**：[抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
-
+- [yutto](https://github.com/yutto-dev/yutto)
+- [ParseHub](https://github.com/z-mio/ParseHub)
+- [抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
+- [XHS-Downloader](https://github.com/JoeanAmier/XHS-Downloader)
+- [aiotieba](https://github.com/Starry-OvO/aiotieba)
+- [视频解析插件](https://github.com/miaoxutao123/astrbot_plugin_videos_analysis)
+- [流媒体聚合解析器](https://github.com/drdon1234/astrbot_plugin_media_parser)
 ---
 
 ## ❤️ 支持

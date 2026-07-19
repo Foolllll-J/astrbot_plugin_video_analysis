@@ -1,5 +1,22 @@
 # 📅 更新日志
 
+## v1.5.0 (2026-07-19)
+
+* 重构 代码架构为模块化组织形式，按平台拆分至 `modules/` 下
+* 重构 抖音解析为多策略架构：Web API / Mobile API / 分享页直解析 / 第三方 API
+* 新增 **小红书** 笔记解析：支持图文/视频/LivePhoto、M3U8 流下载、短链接跳转、Cookie 登录
+* 新增 **贴吧** 帖子解析：基于 protobuf API 获取回帖，支持按时间/热度排序，图片与视频内容
+* 新增 **NGA** 论坛帖子解析：支持 nga.178.com / bbs.nga.cn / ngabbs.com 多域名、Cookie 认证、按时间/热度排序
+* 新增 平台白名单，可选择性启用/禁用各平台
+* 新增 小红书 Cookie 与图片质量配置
+* 新增 贴吧回帖排序方式配置
+* 新增 NGA 登录凭据与排序配置
+* 新增 正文转发阈值、回帖解析上限配置
+* 优化 Cookie 管理与 URL 提取逻辑
+* 移除 旧的 `douyin_scraper`、`bili_get.py`、`douyin_get.py`、`file_send_server.py`
+* 变更 下载目录 `download_videos` → `downloads`
+* 变更 依赖：移除 PyYAML/rich/browser-cookie3，新增 protobuf
+
 ## v1.4.5 (2026-06-28)
 
 * 新增 解析限制白名单，可跳过群等级与频率限制

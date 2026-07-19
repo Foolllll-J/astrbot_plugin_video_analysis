@@ -1,5 +1,3 @@
 gmssl>=3.2.2
-PyYAML>=6.0.1
-rich>=13.0
-browser-cookie3
-importlib-resources
+protobuf>=4.21.1,<8
+SignerPy>=0.12.0
