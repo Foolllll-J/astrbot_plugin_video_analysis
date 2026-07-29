@@ -2,6 +2,8 @@ import re
 
 API_BY_AID = "https://api.bilibili.com/x/web-interface/view?aid={}"
 API_BY_BVID = "https://api.bilibili.com/x/web-interface/view?bvid={}"
+PLAYURL_API = "https://api.bilibili.com/x/player/playurl"
+BUVID_API = "https://api.bilibili.com/x/frontend/finger/spi"
 
 ESTIMATED_BITRATES_MBPS = {
     120: 5.5,  # 4K

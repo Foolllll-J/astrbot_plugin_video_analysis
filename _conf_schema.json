@@ -90,7 +90,7 @@
                 "items": {
                     "cookie": {
                         "description": "抖音 Cookie",
-                        "hint": "选填，用于本地解析抖音视频。",
+                        "hint": "建议填写，用于本地解析出最高画质的抖音视频。",
                         "type": "string",
                         "default": null
                     },

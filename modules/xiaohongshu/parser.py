@@ -31,11 +31,23 @@ class XiaohongshuParser:
         self.cookie = cookie
         self.prefer_original = prefer_original
 
+    _LIVE_URL_RE = re.compile(r"/livestream/|/live/")
+
     async def parse(self, url: str) -> XiaohongshuParseResult:
+        if self._LIVE_URL_RE.search(url):
+            return XiaohongshuParseResult(
+                success=False, error="该链接为小红书直播间，暂不支持下载"
+            )
+
         resolved_url = await self._resolve_url(url)
         if not resolved_url:
             return XiaohongshuParseResult(
                 success=False, error="无法解析小红书链接：链接格式无效"
+            )
+
+        if self._LIVE_URL_RE.search(resolved_url):
+            return XiaohongshuParseResult(
+                success=False, error="该链接为小红书直播间，暂不支持下载"
             )
 
         html = await self._fetch_page(resolved_url)

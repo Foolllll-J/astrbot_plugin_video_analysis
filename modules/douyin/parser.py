@@ -9,9 +9,11 @@
 
 import json
 import os
+import re
 from typing import Callable, Awaitable
 
 import aiofiles
+import httpx
 
 from astrbot.api import logger
 from astrbot.api.message_components import Node, Plain, Nodes
@@ -93,7 +95,53 @@ class DouyinParser:
     ) -> "DouyinParser":
         return cls(cookie=cookie, api_url=api_url, data_dir=data_dir)
 
+    _LIVE_URL_RE = re.compile(r"webcast\.amemv\.com|/webcast/|/live/")
+    _USER_URL_RE = re.compile(r"(?:douyin\.com|iesdouyin\.com)/(?:share/)?user/")
+
+    @staticmethod
+    async def _check_live_url(url: str) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                r = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/144.0.0.0 Safari/537.36"
+                        )
+                    },
+                )
+                return bool(DouyinParser._LIVE_URL_RE.search(str(r.url)))
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _check_user_url(url: str) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                r = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/144.0.0.0 Safari/537.36"
+                        )
+                    },
+                )
+                return bool(DouyinParser._USER_URL_RE.search(str(r.url)))
+        except Exception:
+            return False
+
     async def parse(self, url: str) -> DouyinParseResult:
+        if await self._check_live_url(url):
+            return DouyinParseResult(
+                success=False, error="该链接为抖音直播间，暂不支持下载"
+            )
+        if await self._check_user_url(url):
+            return DouyinParseResult(
+                success=False, error="该链接为抖音用户主页，暂不支持下载"
+            )
+
         params = StrategyParams(url=url, cookie=self._cookie, api_url=self._api_url)
 
         for strategy in self._strategies:

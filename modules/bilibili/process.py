@@ -1,11 +1,31 @@
 import os
+import re
 
 from astrbot.api import logger
 
 from .constants import REG_B23, REG_BV, REG_AV
 from .parser import parse_b23, parse_video, av2bv, UnsupportedBiliLinkError
-from .download import download_video_yutto, download_video_yutto_no_login
-from . import utils
+from .download import (
+    download_video_with_login,
+    download_video_no_login,
+)
+
+
+def _safe_filename(text: str, max_len: int = 40) -> str:
+    text = text.strip()
+    text = re.sub(r'[\\/:*?"<>|]', "", text)
+    text = re.sub(r"\s+", "_", text)
+    text = text[:max_len] if len(text) > max_len else text
+    return text.strip("_")
+
+
+def _make_base_name(author: str, title: str, unique_id: str) -> str:
+    parts = [
+        p
+        for p in [_safe_filename(author, 20), _safe_filename(title, 30), unique_id]
+        if p
+    ]
+    return "_".join(parts)
 
 
 async def process_bili_video(
@@ -41,23 +61,26 @@ async def process_bili_video(
         return {"error": "解析视频信息失败"}
 
     bvid = video_info.bvid
+    cid = video_info.cid
     stats = video_info.stats
+    title = video_info.title
+    owner_name = video_info.owner_name
 
     if download_dir is None:
-        download_dir = "data/plugins/astrbot_plugin_video_analysis/downloads/bili"
+        download_dir = "data/plugins/astrbot_plugin_video_analysis/downloads/bilibili"
 
-    cookies_file = utils.COOKIE_FILE
-
-    cached_file = os.path.join(download_dir, f"{bvid}.mp4")
+    base = _make_base_name(owner_name, title, bvid) if (title or owner_name) else bvid
+    cached_file = os.path.join(download_dir, f"{base}.mp4")
     if os.path.exists(cached_file):
         logger.info(f"本地已存在视频文件：{cached_file}，跳过下载")
         return {
             "video_path": cached_file,
-            "title": video_info.title,
+            "title": title,
             "cover": video_info.cover,
             "duration": video_info.duration,
             "stats": stats,
             "bvid": bvid,
+            "cid": cid,
             "view_count": stats["view"],
             "like_count": stats["like"],
             "danmaku_count": stats["danmaku"],
@@ -68,22 +91,27 @@ async def process_bili_video(
     filename = None
     if download_flag:
         if use_login:
-            logger.debug("调用 yutto 进行下载 (需登录凭证)...")
+            logger.debug("调用 Bilibili API 进行下载 (需登录凭证)...")
             try:
-                filename = await download_video_yutto(
-                    bvid, cookies_file, download_dir, quality=quality, num_workers=8
+                filename = await download_video_with_login(
+                    bvid,
+                    cid,
+                    download_dir,
+                    quality=quality,
+                    title=title,
+                    owner_name=owner_name,
                 )
             except Exception as e:
-                error_str = str(e)
-                if "尚不支持 DASH 格式" in error_str:
-                    logger.warning(f"yutto 高清下载失败 (DASH 不支持)。错误: {e}")
-                    return {"error": f"下载失败: {e}"}
-
-                logger.warning(f"yutto 高清下载失败: {e}")
+                logger.warning(f"高清下载失败: {e}")
                 logger.debug("尝试降级到 360p 无需登录模式...")
                 try:
-                    filename = await download_video_yutto_no_login(
-                        bvid, download_dir, quality=16, num_workers=8
+                    filename = await download_video_no_login(
+                        bvid,
+                        cid,
+                        download_dir,
+                        quality=16,
+                        title=title,
+                        owner_name=owner_name,
                     )
                     logger.debug(f"360p 降级下载成功: {filename}")
                 except Exception as fallback_e:
@@ -92,8 +120,13 @@ async def process_bili_video(
         else:
             logger.debug("未启用登录，尝试下载 360p...")
             try:
-                filename = await download_video_yutto_no_login(
-                    bvid, download_dir, quality=16, num_workers=8
+                filename = await download_video_no_login(
+                    bvid,
+                    cid,
+                    download_dir,
+                    quality=16,
+                    title=title,
+                    owner_name=owner_name,
                 )
             except Exception as e:
                 logger.warning(f"360p 下载失败: {e}")
@@ -115,4 +148,5 @@ async def process_bili_video(
         "coin_count": stats["coin"],
         "favorite_count": stats["favorite"],
         "bvid": bvid,
+        "cid": cid,
     }

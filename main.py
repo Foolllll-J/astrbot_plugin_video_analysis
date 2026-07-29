@@ -17,6 +17,9 @@ from .modules.bilibili import (
     REG_B23,
     REG_BV,
     REG_AV,
+    REG_BILI_LIVE,
+    REG_BILI_DYNAMIC,
+    REG_BILI_SPACE,
     av2bv,
     parse_b23,
     parse_video,
@@ -377,6 +380,19 @@ class videoAnalysis(Star):
         """
         Bilibili 解析与下载核心流程。
         """
+        for pattern, label in [
+            (REG_BILI_LIVE, "直播间"),
+            (REG_BILI_DYNAMIC, "动态"),
+            (REG_BILI_SPACE, "个人空间"),
+        ]:
+            if pattern.search(url):
+                if not self.enable_emoji_reaction:
+                    yield event.plain_result(
+                        f"该链接为 Bilibili {label}，当前不支持解析下载"
+                    )
+                await self._set_emoji(event, 123)
+                return
+
         # 清晰度降级映射：当前质量 -> 下一档质量
         DOWNGRADE_MAP = {120: 112, 112: 80, 80: 64, 64: 32, 32: 16, 16: 16}
 
@@ -407,7 +423,10 @@ class videoAnalysis(Star):
             elif av_match:
                 bvid = av2bv(av_match.group(0))
                 video_info = await parse_video(bvid) if bvid else None
-        except UnsupportedBiliLinkError:
+        except UnsupportedBiliLinkError as e:
+            if not self.enable_emoji_reaction:
+                yield event.plain_result(str(e))
+            await self._set_emoji(event, 123)
             return
 
         if not video_info:
@@ -473,25 +492,16 @@ class videoAnalysis(Star):
                     quality=current_quality,
                     use_login=use_login,
                     event=None,
-                    download_dir=os.path.join(self.download_dir, "bili"),
+                    download_dir=os.path.join(self.download_dir, "bilibili"),
                 )
             except Exception as e:
-                logger.warning(f"下载失败（yutto执行异常）: {e}")
-                result = {"error": f"下载失败（yutto执行异常）: {e}"}
+                logger.warning(f"下载失败: {e}")
+                result = {"error": f"下载失败: {e}"}
                 break
 
             file_path_rel = result.get("video_path") if result else None
             if not file_path_rel or not os.path.exists(file_path_rel):
-                # 如为 DASH 不支持错误，则不继续降级重试。
-                error_msg = result.get("error") if result else None
-                if error_msg and "尚不支持 DASH 格式" in error_msg:
-                    logger.warning(
-                        f"检测到不支持 DASH 格式错误，停止降级重试: {error_msg}"
-                    )
-                else:
-                    logger.warning(
-                        "下载未成功，文件未找到。不进行大小校验，停止降级重试。"
-                    )
+                logger.warning("下载未成功，文件未找到。不进行大小校验，停止降级重试。")
                 break
 
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
@@ -526,7 +536,7 @@ class videoAnalysis(Star):
         async for response in self._process_and_send(event, result, "bili"):
             yield response
         await async_delete_old_files(
-            os.path.join(self.download_dir, "bili"), self.delete_time
+            os.path.join(self.download_dir, "bilibili"), self.delete_time
         )
 
     async def _handle_douyin_parsing(self, event: AstrMessageEvent, url: str):
@@ -554,9 +564,15 @@ class videoAnalysis(Star):
 
         if not parse_result.success:
             logger.error(f"抖音解析失败: {parse_result.error}")
+            nosupport = "暂不支持下载" in parse_result.error
             if not self.enable_emoji_reaction:
-                yield event.plain_result("抱歉，无法获取视频信息，请稍后重试。")
-            await self._set_emoji(event, 357)
+                user_msg = (
+                    parse_result.error
+                    if nosupport
+                    else "抱歉，无法获取视频信息，请稍后重试。"
+                )
+                yield event.plain_result(user_msg)
+            await self._set_emoji(event, 123 if nosupport else 357)
             return
 
         # 步骤 2：前置条件检查
@@ -699,8 +715,13 @@ class videoAnalysis(Star):
         if not parse_result.success:
             logger.error(f"小红书解析失败: {parse_result.error}")
             if not self.enable_emoji_reaction:
-                yield event.plain_result("抱歉，无法获取笔记信息，请稍后重试。")
-            await self._set_emoji(event, 357)
+                user_msg = (
+                    parse_result.error
+                    if "直播" in parse_result.error
+                    else "抱歉，无法获取笔记信息，请稍后重试。"
+                )
+                yield event.plain_result(user_msg)
+            await self._set_emoji(event, 123 if "直播" in parse_result.error else 357)
             return
 
         meta_title = parse_result.title or parse_result.desc
@@ -1312,7 +1333,10 @@ async def auto_parse_dispatcher(
     # --- 1. 检查 Bilibili 链接 ---
     if "bilibili" in _enabled_platforms:
         match_bili = re.search(
-            r"(https?://b23\.tv/[\w]+|https?://bili2233\.cn/[\w]+|BV1\w{9}|av\d+)",
+            r"(https?://b23\.tv/[\w]+|"
+            r"https?://bili2233\.cn/[\w]+|"
+            r"BV1\w{9}|av\d+|"
+            r"https?://(?:live|t|space|www|m)\.bilibili\.com/[\w/]+)",
             message_str,
         )
         match_bili_json = re.search(

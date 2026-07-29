@@ -124,9 +124,12 @@ def parse_aweme_detail(
                     break
     elif aweme_detail.get("video"):
         media_type = "video"
-        urls = _extract_urls_from_addr(aweme_detail["video"].get("play_addr"))
-        if urls:
-            media_items.append({"urls": urls, "type": "video"})
+        video = aweme_detail["video"]
+        urls_265 = _extract_urls_from_addr(video.get("play_addr_265"))
+        urls = _extract_urls_from_addr(video.get("play_addr"))
+        merged = (urls_265 or []) + (urls or [])
+        if merged:
+            media_items.append({"urls": merged, "type": "video"})
 
     duration = 0
     video_bit_rate: list = []

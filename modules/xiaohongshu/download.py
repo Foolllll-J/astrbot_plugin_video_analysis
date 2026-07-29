@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import tempfile
+import time
 from urllib.parse import urljoin
 
 import aiofiles
@@ -12,6 +14,23 @@ from astrbot.api import logger
 
 from .model import XiaohongshuParseResult
 from .constants import DOWNLOAD_HEADERS, DEFAULT_TIMEOUT
+
+
+def _safe_filename(text: str, max_len: int = 40) -> str:
+    text = text.strip()
+    text = re.sub(r'[\\/:*?"<>|]', "", text)
+    text = re.sub(r"\s+", "_", text)
+    text = text[:max_len] if len(text) > max_len else text
+    return text.strip("_")
+
+
+def _make_base_name(author: str, title: str, unique_id: str) -> str:
+    parts = [
+        p
+        for p in [_safe_filename(author, 20), _safe_filename(title, 30), unique_id]
+        if p
+    ]
+    return "_".join(parts)
 
 
 class XiaohongshuDownloader:
@@ -26,6 +45,7 @@ class XiaohongshuDownloader:
         os.makedirs(self.download_dir, exist_ok=True)
 
         note_id = result.note_id or hashlib.md5(url.encode()).hexdigest()
+        base_name = _make_base_name(result.author, result.title, note_id)
 
         ordered_media = []
         img_count = 0
@@ -37,7 +57,7 @@ class XiaohongshuDownloader:
             if m_type == "video":
                 if not candidate_urls:
                     continue
-                v_file = os.path.join(self.download_dir, f"{note_id}.mp4")
+                v_file = os.path.join(self.download_dir, f"{base_name}_{i}.mp4")
                 downloaded = False
                 for v_url in candidate_urls:
                     if os.path.exists(v_file) or await self._download_file(
@@ -58,7 +78,7 @@ class XiaohongshuDownloader:
 
                 ext = ".jpg"
                 img_file = os.path.join(
-                    self.download_dir, f"{note_id}_{img_count}{ext}"
+                    self.download_dir, f"{base_name}_{img_count}{ext}"
                 )
 
                 downloaded = False
@@ -90,9 +110,37 @@ class XiaohongshuDownloader:
                         "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
                     ) as response:
                         response.raise_for_status()
+                        total = int(response.headers.get("content-length", 0))
+                        downloaded = 0
+                        start_time = time.monotonic()
+                        last_log = start_time
                         async with aiofiles.open(save_path, "wb") as f:
                             async for chunk in response.aiter_bytes():
                                 await f.write(chunk)
+                                downloaded += len(chunk)
+                                now = time.monotonic()
+                                if now - last_log >= 60:
+                                    last_log = now
+                                    elapsed = now - start_time
+                                    mb = downloaded / (1024 * 1024)
+                                    if total:
+                                        pct = downloaded * 100 // total
+                                        eta_s = (total - downloaded) / max(
+                                            downloaded / elapsed, 1
+                                        )
+                                        eta_str = (
+                                            f"预计剩余{eta_s / 60:.0f}m"
+                                            if eta_s >= 60
+                                            else f"预计剩余{eta_s:.0f}s"
+                                        )
+                                        logger.debug(
+                                            f"小红书下载中... {mb:.0f}MB/{total / (1024 * 1024):.0f}MB "
+                                            f"({pct}%) 已用{elapsed / 60:.0f}m {eta_str}"
+                                        )
+                                    else:
+                                        logger.debug(
+                                            f"小红书下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
+                                        )
                 return True
             except Exception as e:
                 logger.warning(
@@ -107,7 +155,9 @@ class XiaohongshuDownloader:
     async def _download_m3u8(self, m3u8_url: str, output_path: str) -> bool:
         try:
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, verify=False) as c:
-                r = await c.get(m3u8_url, headers=DOWNLOAD_HEADERS, follow_redirects=True)
+                r = await c.get(
+                    m3u8_url, headers=DOWNLOAD_HEADERS, follow_redirects=True
+                )
                 r.raise_for_status()
                 playlist = r.text
         except Exception as e:

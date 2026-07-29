@@ -1,5 +1,7 @@
 import hashlib
 import os
+import re
+import time
 
 import aiofiles
 import httpx
@@ -8,6 +10,23 @@ from astrbot.api import logger
 
 from .model import DouyinParseResult, _clean_video_url
 from .constants import DOWNLOAD_HEADERS, DOWNLOAD_TIMEOUT
+
+
+def _safe_filename(text: str, max_len: int = 40) -> str:
+    text = text.strip()
+    text = re.sub(r'[\\/:*?"<>|]', "", text)
+    text = re.sub(r"\s+", "_", text)
+    text = text[:max_len] if len(text) > max_len else text
+    return text.strip("_")
+
+
+def _make_base_name(author: str, title: str, unique_id: str) -> str:
+    parts = [
+        p
+        for p in [_safe_filename(author, 20), _safe_filename(title, 30), unique_id]
+        if p
+    ]
+    return "_".join(parts)
 
 
 class DouyinDownloader:
@@ -35,11 +54,61 @@ class DouyinDownloader:
             return await self._download_third_party(result, url)
         return {"error": f"未知来源: {result.source}"}
 
+    async def _try_download_one(
+        self, url: str, save_path: str, label: str = ""
+    ) -> bool:
+        try:
+            async with httpx.AsyncClient(
+                timeout=DOWNLOAD_TIMEOUT, verify=False
+            ) as client:
+                async with client.stream(
+                    "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
+                ) as resp:
+                    resp.raise_for_status()
+                    total = int(resp.headers.get("content-length", 0))
+                    downloaded = 0
+                    start_time = time.monotonic()
+                    last_log = start_time
+                    async with aiofiles.open(save_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes():
+                            await f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.monotonic()
+                            if now - last_log >= 60:
+                                last_log = now
+                                elapsed = now - start_time
+                                mb = downloaded / (1024 * 1024)
+                                if total:
+                                    pct = downloaded * 100 // total
+                                    eta_s = (total - downloaded) / max(
+                                        downloaded / elapsed, 1
+                                    )
+                                    eta_str = (
+                                        f"预计剩余{eta_s / 60:.0f}m"
+                                        if eta_s >= 60
+                                        else f"预计剩余{eta_s:.0f}s"
+                                    )
+                                    logger.debug(
+                                        f"{label}下载中... {mb:.0f}MB/{total / (1024 * 1024):.0f}MB "
+                                        f"({pct}%) 已用{elapsed / 60:.0f}m {eta_str}"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"{label}下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
+                                    )
+        except Exception:
+            if os.path.exists(save_path):
+                os.remove(save_path)
+            return False
+
+        return True
+
     async def _download_local(self, result: DouyinParseResult, url: str) -> dict:
         aweme_id = result.aweme_id or hashlib.md5(url.encode()).hexdigest()
         title = result.title
         author = result.author
         duration = result.duration
+        base_name = _make_base_name(author, title, aweme_id)
 
         media_items = []
         for i, item in enumerate(result.media_items):
@@ -47,23 +116,24 @@ class DouyinDownloader:
             m_type = item["type"]
 
             if m_type == "video":
-                v_file = os.path.join(self.download_dir, f"{aweme_id}_{i}.mp4")
+                v_file = os.path.join(self.download_dir, f"{base_name}_{i}.mp4")
 
                 downloaded = False
-                if i == 0 and result.video_bit_rate:
+
+                for c_url in candidate_urls:
+                    if os.path.exists(v_file):
+                        downloaded = True
+                        break
+                    if await self._try_download_one(c_url, v_file, "抖音"):
+                        downloaded = True
+                        break
+
+                if not downloaded and i == 0 and result.video_bit_rate:
                     dl_result = await self._download_with_downgrade(
                         url, v_file, result.video_bit_rate, title, author, duration
                     )
                     if dl_result or os.path.exists(v_file):
                         downloaded = True
-
-                if not downloaded:
-                    for c_url in candidate_urls:
-                        if os.path.exists(v_file) or await self._download_file(
-                            c_url, v_file
-                        ):
-                            downloaded = True
-                            break
 
                 if downloaded:
                     media_items.append({"path": v_file, "type": "video"})
@@ -84,7 +154,7 @@ class DouyinDownloader:
                 elif ".gif" in img_url.lower():
                     ext = ".gif"
 
-                img_file = os.path.join(self.download_dir, f"{aweme_id}_{i}{ext}")
+                img_file = os.path.join(self.download_dir, f"{base_name}_{i}{ext}")
                 if os.path.exists(img_file) or await self._download_file(
                     img_url, img_file
                 ):
@@ -122,8 +192,9 @@ class DouyinDownloader:
             bit_rate.sort(key=lambda x: x["quality_type"], reverse=True)
             duration = (video_data.get("duration", 0) or 0) / 1000
 
-            simple_id = hashlib.md5(url.encode()).hexdigest()
-            final_file = os.path.join(self.download_dir, f"{simple_id}.mp4")
+            simple_id = hashlib.md5(url.encode()).hexdigest()[:12]
+            base_name = _make_base_name(result.author, result.title, simple_id)
+            final_file = os.path.join(self.download_dir, f"{base_name}.mp4")
 
             if os.path.exists(final_file):
                 return {
@@ -155,9 +226,6 @@ class DouyinDownloader:
         author: str,
         duration: float,
     ) -> dict | None:
-        # 按分辨率降序排列
-        # 过滤 ByteVC1 私有编码（无法被标准播放器解码，会导致有音无画）
-        bit_rate = [br for br in bit_rate if br.get("is_bytevc1", 0) == 0]
         sorted_rates = sorted(
             bit_rate,
             key=lambda x: (
@@ -176,36 +244,25 @@ class DouyinDownloader:
                 continue
             quality_url = _clean_video_url(url_list[0])
 
-            try:
-                async with httpx.AsyncClient(
-                    timeout=DOWNLOAD_TIMEOUT, verify=False
-                ) as client:
-                    async with client.stream(
-                        "GET", quality_url, headers=DOWNLOAD_HEADERS, follow_redirects=True
-                    ) as resp:
-                        resp.raise_for_status()
-                        async with aiofiles.open(final_file, "wb") as f:
-                            async for chunk in resp.aiter_bytes():
-                                await f.write(chunk)
+            if os.path.exists(final_file):
+                os.remove(final_file)
 
-                file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
-                if file_size_mb > self.max_size and self.smart_downgrade:
-                    os.remove(final_file)
-                    continue
-
-                return {
-                    "title": title,
-                    "author": author,
-                    "url": original_url,
-                    "video_path": final_file,
-                    "duration": duration,
-                }
-
-            except Exception as e:
-                logger.warning(f"抖音清晰度降级下载失败: {e}")
-                if os.path.exists(final_file):
-                    os.remove(final_file)
+            ok = await self._try_download_one(quality_url, final_file, "抖音降级")
+            if not ok:
                 continue
+
+            file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
+            if file_size_mb > self.max_size and self.smart_downgrade:
+                os.remove(final_file)
+                continue
+
+            return {
+                "title": title,
+                "author": author,
+                "url": original_url,
+                "video_path": final_file,
+                "duration": duration,
+            }
 
         return None
 
@@ -218,9 +275,37 @@ class DouyinDownloader:
                     "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
                 ) as response:
                     response.raise_for_status()
+                    total = int(response.headers.get("content-length", 0))
+                    downloaded = 0
+                    start_time = time.monotonic()
+                    last_log = start_time
                     async with aiofiles.open(save_path, "wb") as f:
                         async for chunk in response.aiter_bytes():
                             await f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.monotonic()
+                            if now - last_log >= 60:
+                                last_log = now
+                                elapsed = now - start_time
+                                mb = downloaded / (1024 * 1024)
+                                if total:
+                                    pct = downloaded * 100 // total
+                                    eta_s = (total - downloaded) / max(
+                                        downloaded / elapsed, 1
+                                    )
+                                    eta_str = (
+                                        f"预计剩余{eta_s / 60:.0f}m"
+                                        if eta_s >= 60
+                                        else f"预计剩余{eta_s:.0f}s"
+                                    )
+                                    logger.debug(
+                                        f"抖音下载中... {mb:.0f}MB/{total / (1024 * 1024):.0f}MB "
+                                        f"({pct}%) 已用{elapsed / 60:.0f}m {eta_str}"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"抖音下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
+                                    )
             return True
         except Exception as e:
             logger.error(f"文件下载失败: {url}, 错误: {e}")

@@ -8,6 +8,7 @@ class BiliVideoInfo:
         cover: str,
         duration: int,
         stats: dict,
+        owner_name: str = "",
     ):
         self.aid = aid
         self.cid = cid
@@ -16,6 +17,7 @@ class BiliVideoInfo:
         self.cover = cover
         self.duration = duration
         self.stats = stats
+        self.owner_name = owner_name
 
     def to_dict(self) -> dict:
         return {
@@ -26,4 +28,5 @@ class BiliVideoInfo:
             "cover": self.cover,
             "duration": self.duration,
             "stats": self.stats,
+            "owner_name": self.owner_name,
         }

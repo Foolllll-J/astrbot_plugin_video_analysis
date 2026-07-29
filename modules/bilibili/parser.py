@@ -58,6 +58,8 @@ async def parse_video(bvid: str) -> BiliVideoInfo | None:
         "favorite": format_number(info["stat"]["favorite"]),
     }
 
+    owner_name = (info.get("owner") or {}).get("name", "")
+
     return BiliVideoInfo(
         aid=info["aid"],
         cid=info["cid"],
@@ -66,6 +68,7 @@ async def parse_video(bvid: str) -> BiliVideoInfo | None:
         cover=info["pic"],
         duration=info["duration"],
         stats=stats,
+        owner_name=owner_name,
     )
 
 

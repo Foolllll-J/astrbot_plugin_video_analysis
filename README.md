@@ -34,28 +34,9 @@
 
 ## 🚀 安装
 
-1. 由于插件依赖于外部命令行工具，请确保您的 Docker 容器内已安装它们：
-
-```bash
-# 1. 进入容器终端
-docker exec -it [你的容器ID或名称] /bin/bash
-
-# 2. 安装 FFmpeg
-apt-get update && apt-get install ffmpeg -y
-
-# 3. 安装 ppix
-pip install pipx
-
-# 4. 添加路径
-pipx ensurepath
-
-# 5. 安装 yutto
-pipx install yutto
-```
-
-2. 下载本仓库。
-3. 将整个 `astrbot_plugin_video_analysis` 文件夹放入 `astrbot` 的 `plugins` 目录中。
-4. 重启 AstrBot。
+1. 下载本仓库。
+2. 将整个 `astrbot_plugin_video_analysis` 文件夹放入 `astrbot` 的 `plugins` 目录中。
+3. 确保已安装 ffmpeg（用于 B站 DASH 视频合并），重启 AstrBot。
 
 ---
 
@@ -75,7 +56,6 @@ pipx install yutto
 
 本项目参考或得益于以下项目，特此感谢：
 
-- [yutto](https://github.com/yutto-dev/yutto)
 - [ParseHub](https://github.com/z-mio/ParseHub)
 - [抖音/TikTok API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
 - [XHS-Downloader](https://github.com/JoeanAmier/XHS-Downloader)
