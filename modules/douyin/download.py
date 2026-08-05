@@ -103,6 +103,65 @@ class DouyinDownloader:
 
         return True
 
+    def _preselect_video_urls(self, result: DouyinParseResult) -> list[str]:
+        """主下载路径的 data_size 前置预选。
+
+        仅当最高画质档的 data_size 已知且超过大小限制时，返回一档不超过限制的
+        最高画质 URL；否则返回空列表，保持原有 raw play_addr 下载逻辑（不降质）。
+        """
+        if not self.smart_downgrade or self.max_size <= 0:
+            return []
+        br = result.video_bit_rate or []
+        if not br:
+            return []
+        sorted_rates = sorted(
+            br,
+            key=lambda x: (
+                x.get("play_addr", {}).get("width", 0)
+                * x.get("play_addr", {}).get("height", 0),
+                x.get("play_addr", {}).get("data_size", 0),
+                x.get("bit_rate", 0),
+            ),
+            reverse=True,
+        )
+        limit_bytes = self.max_size * 1024 * 1024
+        best_size = (sorted_rates[0].get("play_addr") or {}).get("data_size") or 0
+        if not best_size or best_size <= limit_bytes:
+            return []
+        for tier in sorted_rates[1:]:
+            pa = tier.get("play_addr", {}) or {}
+            size = pa.get("data_size") or 0
+            if not size or size > limit_bytes:
+                continue
+            urls = pa.get("url_list") or pa.get("urlList") or []
+            cleaned = [_clean_video_url(u) for u in urls if isinstance(u, str)]
+            return [u for u in cleaned if u]
+        return []
+
+    def video_all_qualities_over_limit(self, result: DouyinParseResult) -> bool:
+        """最低清晰度仍超限：所有已知码率档的 data_size 都超过大小限制。
+
+        仅当所有档位 data_size 均已知且全部超限时返回 True；任何一档大小未知
+        或存在可容纳档时返回 False，交由正常下载逻辑处理。
+        """
+        if not self.smart_downgrade or self.max_size <= 0:
+            return False
+        br = result.video_bit_rate or []
+        if not br:
+            raw = result.raw_data or {}
+            video = (raw.get("data") or {}).get("video") or {}
+            br = video.get("bit_rate") or []
+        if not br:
+            return False
+        limit_bytes = self.max_size * 1024 * 1024
+        for tier in br:
+            size = (tier.get("play_addr") or {}).get("data_size") or 0
+            if not size:
+                return False  # 存在未知大小档，无法可靠预判
+            if size <= limit_bytes:
+                return False  # 存在可容纳档
+        return True
+
     async def _download_local(self, result: DouyinParseResult, url: str) -> dict:
         aweme_id = result.aweme_id or hashlib.md5(url.encode()).hexdigest()
         title = result.title
@@ -120,7 +179,11 @@ class DouyinDownloader:
 
                 downloaded = False
 
-                for c_url in candidate_urls:
+                preselect_urls = self._preselect_video_urls(result) if i == 0 else []
+                ordered_urls = [u for u in preselect_urls if u not in candidate_urls]
+                ordered_urls += candidate_urls
+
+                for c_url in ordered_urls:
                     if os.path.exists(v_file):
                         downloaded = True
                         break
@@ -241,6 +304,14 @@ class DouyinDownloader:
             play_addr = br.get("play_addr", {})
             url_list = play_addr.get("url_list") or play_addr.get("urlList")
             if not url_list:
+                continue
+            data_size = play_addr.get("data_size") or 0
+            if (
+                self.smart_downgrade
+                and data_size
+                and data_size > self.max_size * 1024 * 1024
+            ):
+                logger.debug(f"抖音降级：跳过 data_size={data_size}B 超限档")
                 continue
             quality_url = _clean_video_url(url_list[0])
 

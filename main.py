@@ -8,6 +8,7 @@ import astrbot.api.message_components as Comp
 import re
 import os
 import asyncio
+import time
 import httpx
 from typing import List
 from datetime import datetime
@@ -20,14 +21,17 @@ from .modules.bilibili import (
     REG_BILI_LIVE,
     REG_BILI_DYNAMIC,
     REG_BILI_SPACE,
-    av2bv,
+    parse_av,
     parse_b23,
     parse_video,
-    estimate_size,
+    estimate_size_with_plan,
+    probe_quality_plan,
     init_bili_module,
     bili_login,
     check_cookie_valid,
     UnsupportedBiliLinkError,
+    _best_qn,
+    _same_tier,
 )
 from .modules.douyin import (
     DouyinParser,
@@ -35,7 +39,6 @@ from .modules.douyin import (
     init_douyin_login,
     get_effective_douyin_cookie,
     format_douyin_failure_message,
-    send_douyin_with_title_forward,
 )
 from .modules.xiaohongshu import (
     XiaohongshuParser,
@@ -50,6 +53,15 @@ from .modules.nga import (
     NgaDownloader,
 )
 from .modules.auto_delete import delete_old_files
+from .modules.media_cache import (
+    MediaCache,
+    build_xhs_meta_text,
+    forward_long_text,
+    lookup_cached_media,
+    media_files_from_result,
+    send_cached_result,
+    visible_len,
+)
 from .modules.parse_guard import (
     ParseGuard,
     check_group_level_requirement,
@@ -65,11 +77,6 @@ async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) 
     return await loop.run_in_executor(
         None, delete_old_files, folder_path, time_threshold_minutes
     )
-
-
-def _visible_len(text: str) -> int:
-    text = re.sub(r"#[^#\s]+(?:\[[^\]]*\])?#?\s*", "", text)
-    return len(re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]", "", text))
 
 
 class videoAnalysis(Star):
@@ -118,6 +125,7 @@ class videoAnalysis(Star):
 
         self.max_video_size = delivery_config.get("max_video_size", 200)
         self.delete_time = delivery_config.get("delete_time", 60)
+        self.media_cache = MediaCache(self)
         self.media_max_images = delivery_config.get("max_images", 20)
         self.media_max_replies = delivery_config.get("max_replies", 20)
         self.text_forward_threshold = delivery_config.get("text_forward_threshold", 50)
@@ -233,6 +241,9 @@ class videoAnalysis(Star):
                 set=set_val,
             )
         except Exception as e:
+            retcode = getattr(e, "retcode", None)
+            if not set_val and (retcode == 1200 or "未设置过该表情" in str(e)):
+                return
             logger.warning(
                 f"{'设置' if set_val else '取消'}表情回应失败 (emoji_id: {emoji_id}): {e}"
             )
@@ -376,6 +387,11 @@ class videoAnalysis(Star):
 
         return
 
+    async def _cleanup_media(self, download_dir: str):
+        """清理过期媒体文件，并联动清理失效的本地缓存条目。"""
+        await async_delete_old_files(download_dir, self.delete_time)
+        await self.media_cache.cleanup(self.delete_time * 60)
+
     async def _handle_bili_parsing(self, event: AstrMessageEvent, url: str):
         """
         Bilibili 解析与下载核心流程。
@@ -392,6 +408,17 @@ class videoAnalysis(Star):
                     )
                 await self._set_emoji(event, 123)
                 return
+
+        # 缓存直发：本地已解析过的内容直接发送，免解析免下载
+        status, cached_entry = await lookup_cached_media(self, event, url, "bilibili")
+        if status == "hit":
+            async for response in send_cached_result(
+                self, event, cached_entry, "bilibili"
+            ):
+                yield response
+            return
+        if status == "blocked":
+            return
 
         # 清晰度降级映射：当前质量 -> 下一档质量
         DOWNGRADE_MAP = {120: 112, 112: 80, 80: 64, 64: 32, 32: 16, 16: 16}
@@ -421,8 +448,7 @@ class videoAnalysis(Star):
             elif bvid_match:
                 video_info = await parse_video(bvid_match.group(0))
             elif av_match:
-                bvid = av2bv(av_match.group(0))
-                video_info = await parse_video(bvid) if bvid else None
+                video_info = await parse_av(av_match.group(0))
         except UnsupportedBiliLinkError as e:
             if not self.enable_emoji_reaction:
                 yield event.plain_result(str(e))
@@ -450,22 +476,72 @@ class videoAnalysis(Star):
         # 通过检查，贴上正在解析的表情
         await self._set_emoji(event, 424)
 
-        # 步骤 2：智能预估起始清晰度（不使用固定降级次数上限）
+        # 步骤 2：智能预估起始清晰度（使用真实码率探测）
         target_quality = initial_quality
+        lowest_still_over = False
+        real_qualities_desc: list[int] = []  # 真实可用档位（降序），供后置降级使用
         if self.smart_downgrade and video_duration > 0:
-            temp_quality = initial_quality
-            while temp_quality >= 16:
-                estimated_size_mb = estimate_size(temp_quality, video_duration)
-                if estimated_size_mb <= max_size:
-                    break
-                next_q = DOWNGRADE_MAP.get(temp_quality)
-                if next_q is None or next_q == temp_quality:
-                    break
-                temp_quality = next_q
-            target_quality = temp_quality
+            quality_plan = await probe_quality_plan(
+                video_info.bvid, video_info.cid, use_login=use_login
+            )
+            # 优先使用探测到的真实档位（降序）逐档估算；探测失败时回退固定表
+            real_qualities_desc = sorted(
+                set((quality_plan.get("qualities") or {}).keys())
+                | set(quality_plan.get("accept_quality") or []),
+                reverse=True,
+            )
+            if real_qualities_desc:
+                # 起点：真实档位中最接近初始档的档（精确优先，112↔116 同级互备）
+                start_qn = _best_qn(real_qualities_desc, initial_quality)
+                temp_quality = start_qn
+                has_exact = initial_quality in real_qualities_desc
+                for qn in real_qualities_desc:
+                    if qn > start_qn and not _same_tier(qn, start_qn):
+                        continue
+                    # 存在精确档时，同级档（112↔116）不参与预估，避免绕过精确档
+                    if has_exact and _same_tier(qn, start_qn) and qn != start_qn:
+                        continue
+                    estimated_size_mb = estimate_size_with_plan(
+                        qn, video_duration, quality_plan
+                    )
+                    if estimated_size_mb <= max_size:
+                        temp_quality = qn
+                        break
+                    temp_quality = qn
+                else:
+                    temp_quality = real_qualities_desc[-1]
+                    lowest_still_over = (
+                        estimate_size_with_plan(
+                            temp_quality, video_duration, quality_plan
+                        )
+                        > max_size
+                    )
+                target_quality = temp_quality
+            else:
+                temp_quality = initial_quality
+                while temp_quality >= 16:
+                    estimated_size_mb = estimate_size_with_plan(
+                        temp_quality, video_duration, quality_plan
+                    )
+                    if estimated_size_mb <= max_size:
+                        break
+                    next_q = DOWNGRADE_MAP.get(temp_quality)
+                    if next_q is None or next_q == temp_quality:
+                        lowest_still_over = temp_quality == 16
+                        break
+                    temp_quality = next_q
+                target_quality = temp_quality
             logger.debug(
                 f"智能预估：视频时长 {video_duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。"
             )
+
+        if lowest_still_over:
+            logger.warning(
+                f"智能预估：最低清晰度(360P)预估仍超过上限 {max_size}MB，跳过下载。"
+            )
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 325)
+            return
 
         current_quality = target_quality
 
@@ -512,7 +588,15 @@ class videoAnalysis(Star):
                 break
 
             # 文件超限：若可降级则继续尝试下一档清晰度
-            next_quality = DOWNGRADE_MAP.get(current_quality)
+            if real_qualities_desc and current_quality in real_qualities_desc:
+                idx = real_qualities_desc.index(current_quality)
+                next_quality = None
+                for q in real_qualities_desc[idx + 1 :]:
+                    if not _same_tier(q, current_quality):
+                        next_quality = q
+                        break
+            else:
+                next_quality = DOWNGRADE_MAP.get(current_quality)
             can_downgrade = next_quality is not None and next_quality != current_quality
             if can_downgrade:
                 logger.warning(
@@ -533,11 +617,26 @@ class videoAnalysis(Star):
             break
 
         # 步骤 4：统一处理与发送
+        if result and result.get("video_path") and os.path.exists(result["video_path"]):
+            try:
+                await self.media_cache.put(
+                    "bilibili",
+                    video_info.bvid,
+                    {
+                        "title": video_title,
+                        "duration": video_duration,
+                        "media_type": "video",
+                        "media_files": [
+                            {"path": result["video_path"], "type": "video"}
+                        ],
+                        "saved_at": time.time(),
+                    },
+                )
+            except Exception as e:
+                logger.debug(f"写入 B站缓存失败: {e}")
         async for response in self._process_and_send(event, result, "bili"):
             yield response
-        await async_delete_old_files(
-            os.path.join(self.download_dir, "bilibili"), self.delete_time
-        )
+        await self._cleanup_media(os.path.join(self.download_dir, "bilibili"))
 
     async def _handle_douyin_parsing(self, event: AstrMessageEvent, url: str):
         """
@@ -555,6 +654,17 @@ class videoAnalysis(Star):
             cookie_from_config=self._douyin_cookie_from_config,
             cookie_from_file=self._douyin_cookie_from_file,
         )
+
+        # 缓存直发：本地已解析过的内容直接发送，免解析免下载
+        status, cached_entry = await lookup_cached_media(self, event, url, "douyin")
+        if status == "hit":
+            async for response in send_cached_result(
+                self, event, cached_entry, "douyin"
+            ):
+                yield response
+            return
+        if status == "blocked":
+            return
 
         # 步骤 1：解析（获取元数据 + 原始数据）
         parser = DouyinParser(
@@ -588,6 +698,25 @@ class videoAnalysis(Star):
         # 步骤 3：通过检查，贴上正在解析的表情
         await self._set_emoji(event, 424)
 
+        # 步骤 3.5：智能预估（data_size 预判最低清晰度仍超限则跳过下载）
+        max_size = self.max_video_size
+        if self.admin_bypass_content_restrictions and self._is_admin_event(event):
+            logger.debug("管理员跳过内容级限制：抖音解析跳过智能降级和大小校验")
+            max_size = float("inf")
+        downloader = DouyinDownloader(
+            download_dir=download_dir,
+            max_images=self.media_max_images,
+            max_size=max_size,
+            smart_downgrade=self.smart_downgrade,
+        )
+        if downloader.video_all_qualities_over_limit(parse_result):
+            logger.warning(
+                f"抖音智能预估：最低清晰度仍超过上限 {self.max_video_size}MB，跳过下载。"
+            )
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 325)
+            return
+
         # 步骤 4：开始下载
         result = None
         for attempt in range(MAX_DOUYIN_PROCESS_RETRIES + 1):
@@ -596,19 +725,6 @@ class videoAnalysis(Star):
                     f"尝试下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_DOUYIN_PROCESS_RETRIES + 1})"
                 )
 
-                max_size = self.max_video_size
-                if self.admin_bypass_content_restrictions and self._is_admin_event(
-                    event
-                ):
-                    logger.debug("管理员跳过内容级限制：抖音解析跳过智能降级和大小校验")
-                    max_size = float("inf")
-
-                downloader = DouyinDownloader(
-                    download_dir=download_dir,
-                    max_images=self.media_max_images,
-                    max_size=max_size,
-                    smart_downgrade=self.smart_downgrade,
-                )
                 result = await downloader.download(parse_result, url)
 
                 if result.get("error"):
@@ -661,12 +777,31 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
             return
 
+        # 文件落地后写入缓存（供后续免解析直发）
+        if isinstance(result, dict) and parse_result.aweme_id:
+            try:
+                cached_files = media_files_from_result(result)
+                if cached_files:
+                    await self.media_cache.put(
+                        "douyin",
+                        parse_result.aweme_id,
+                        {
+                            "title": meta_title,
+                            "duration": meta_duration,
+                            "media_type": result.get("type", ""),
+                            "media_files": cached_files,
+                            "saved_at": time.time(),
+                        },
+                    )
+            except Exception as e:
+                logger.debug(f"写入抖音缓存失败: {e}")
+
         # 步骤 5：检查是否需要将标题作为文章合并转发
         if (
             self.text_forward_threshold > 0
-            and _visible_len(meta_title) > self.text_forward_threshold
+            and visible_len(meta_title) > self.text_forward_threshold
         ):
-            async for response in send_douyin_with_title_forward(
+            async for response in forward_long_text(
                 event,
                 meta_title,
                 result,
@@ -698,13 +833,22 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
             return
 
-        # 统一清理文件
+        # 统一清理文件与缓存
         download_dir_douyin = os.path.join(self.download_dir, "douyin")
-        await async_delete_old_files(download_dir_douyin, self.delete_time)
+        await self._cleanup_media(download_dir_douyin)
 
     async def _handle_xhs_parsing(self, event: AstrMessageEvent, url: str):
         """小红书解析和下载核心逻辑"""
         download_dir = os.path.join(self.download_dir, "xhs")
+
+        # 缓存直发：本地已解析过的内容直接发送，免解析免下载
+        status, cached_entry = await lookup_cached_media(self, event, url, "xhs")
+        if status == "hit":
+            async for response in send_cached_result(self, event, cached_entry, "xhs"):
+                yield response
+            return
+        if status == "blocked":
+            return
 
         parser = XiaohongshuParser(
             cookie=self._xhs_cookie,
@@ -752,23 +896,34 @@ class videoAnalysis(Star):
         meta_desc = parse_result.desc
         has_title = parse_result.has_title
 
+        # 文件落地后写入缓存（供后续免解析直发）
+        if parse_result.note_id:
+            try:
+                cached_files = media_files_from_result(result)
+                if cached_files:
+                    await self.media_cache.put(
+                        "xhs",
+                        parse_result.note_id,
+                        {
+                            "title": meta_title,
+                            "duration": parse_result.duration,
+                            "media_type": result.get("type", ""),
+                            "media_files": cached_files,
+                            "desc": meta_desc,
+                            "has_title": has_title,
+                            "saved_at": time.time(),
+                        },
+                    )
+            except Exception as e:
+                logger.debug(f"写入小红书缓存失败: {e}")
+
         # 全文（标题 + 正文）过长时使用合并转发
-        # 有真正标题时用「」包裹，正文空行分隔
-        meta_text = ""
-        if has_title:
-            meta_text = f"「{meta_title}」"
-        if meta_desc:
-            if meta_text:
-                meta_text += "\n\u200b\n" + meta_desc
-            else:
-                meta_text = meta_desc
-        if not meta_text:
-            meta_text = meta_title or ""
+        meta_text = build_xhs_meta_text(meta_title, meta_desc, has_title)
         if (
             self.text_forward_threshold > 0
-            and _visible_len(meta_text) > self.text_forward_threshold
+            and visible_len(meta_text) > self.text_forward_threshold
         ):
-            async for response in send_douyin_with_title_forward(
+            async for response in forward_long_text(
                 event,
                 meta_text,
                 result,
@@ -779,7 +934,7 @@ class videoAnalysis(Star):
                 media_sender_name="小红书内容",
             ):
                 yield response
-            await async_delete_old_files(download_dir, self.delete_time)
+            await self._cleanup_media(download_dir)
             return
 
         # 单视频走已有发送逻辑
@@ -793,7 +948,7 @@ class videoAnalysis(Star):
             ):
                 yield response
 
-        await async_delete_old_files(download_dir, self.delete_time)
+        await self._cleanup_media(download_dir)
 
     async def _handle_tieba_parsing(self, event: AstrMessageEvent, url: str):
         """贴吧解析和下载核心逻辑"""
@@ -953,7 +1108,7 @@ class videoAnalysis(Star):
 
         await self._set_emoji(event, 424, False)
         await self._set_emoji(event, 124)
-        await async_delete_old_files(download_dir, self.delete_time)
+        await self._cleanup_media(download_dir)
 
     async def _handle_nga_parsing(self, event: AstrMessageEvent, url: str):
         url = re.sub(r"https?://[^/]+", "https://bbs.nga.cn", url)
@@ -1087,7 +1242,7 @@ class videoAnalysis(Star):
 
         await self._set_emoji(event, 424, False)
         await self._set_emoji(event, 124)
-        await async_delete_old_files(download_dir, self.delete_time)
+        await self._cleanup_media(download_dir)
 
     async def _send_douyin_multimedia(
         self, event: AstrMessageEvent, result: dict, sender_name: str = "抖音内容"
@@ -1364,6 +1519,18 @@ async def auto_parse_dispatcher(
                     event, "B站"
                 )
                 if not allowed:
+                    status, cached_entry = await lookup_cached_media(
+                        self, event, url, "bilibili"
+                    )
+                    if status == "hit":
+                        async for response in send_cached_result(
+                            self, event, cached_entry, "bilibili"
+                        ):
+                            yield response
+                        return
+                    if status == "blocked":
+                        return
+                    await self._set_emoji(event, 179)
                     return
 
             try:
@@ -1407,6 +1574,7 @@ async def auto_parse_dispatcher(
                     event, "NGA"
                 )
                 if not allowed:
+                    await self._set_emoji(event, 179)
                     return
             try:
                 async for response in self._handle_nga_parsing(event, url):
@@ -1454,6 +1622,7 @@ async def auto_parse_dispatcher(
                     event, "贴吧"
                 )
                 if not allowed:
+                    await self._set_emoji(event, 179)
                     return
 
             try:
@@ -1510,6 +1679,18 @@ async def auto_parse_dispatcher(
                     event, "小红书"
                 )
                 if not allowed:
+                    status, cached_entry = await lookup_cached_media(
+                        self, event, url, "xhs"
+                    )
+                    if status == "hit":
+                        async for response in send_cached_result(
+                            self, event, cached_entry, "xhs"
+                        ):
+                            yield response
+                        return
+                    if status == "blocked":
+                        return
+                    await self._set_emoji(event, 179)
                     return
 
             try:
@@ -1560,6 +1741,18 @@ async def auto_parse_dispatcher(
                     event, "抖音"
                 )
                 if not allowed:
+                    status, cached_entry = await lookup_cached_media(
+                        self, event, url, "douyin"
+                    )
+                    if status == "hit":
+                        async for response in send_cached_result(
+                            self, event, cached_entry, "douyin"
+                        ):
+                            yield response
+                        return
+                    if status == "blocked":
+                        return
+                    await self._set_emoji(event, 179)
                     return
 
             try:

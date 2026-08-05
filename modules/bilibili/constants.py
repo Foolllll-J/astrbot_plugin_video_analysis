@@ -7,6 +7,7 @@ BUVID_API = "https://api.bilibili.com/x/frontend/finger/spi"
 
 ESTIMATED_BITRATES_MBPS = {
     120: 5.5,  # 4K
+    116: 2.6,  # 1080P60（与 112 同级码率近似）
     112: 2.6,  # 1080P+
     80: 1.4,  # 1080P
     64: 0.65,  # 720P

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import time
 
 import aiofiles
@@ -49,7 +50,7 @@ async def _get_playurl(
         "fnval": fnval,
         "fourk": 1,
         "otype": "json",
-        "platform": "html5",
+        "platform": "pc",
         "high_quality": 1,
     }
     cookie_dict = {
@@ -83,7 +84,26 @@ def _collect_urls(base_url: str | None, backup_list: list[str] | None) -> list[s
     return [u for u in urls if not (u in seen or seen.add(u))]
 
 
+# 同级档位映射：112(1080P+) 与 116(1080P60) 码率相近，视为同级互备
+QN_PEERS = {112: 116, 116: 112}
+
+
+def _same_tier(a: int, b: int) -> bool:
+    """判断两个档位是否同级（112 与 116 互备）。"""
+    return a == b or QN_PEERS.get(a) == b
+
+
 def _best_qn(accept_quality: list[int], target_qn: int) -> int:
+    """在真实可用档位中选取最接近目标档的档位。
+
+    优先精确命中目标档；目标档不存在时，若同级互备档存在（112↔116）
+    则返回互备档；否则取不超过目标档的最高档，再无则取最低档。
+    """
+    if target_qn in accept_quality:
+        return target_qn
+    peer = QN_PEERS.get(target_qn)
+    if peer and peer in accept_quality:
+        return peer
     candidates = [q for q in accept_quality if q <= target_qn]
     return max(candidates) if candidates else min(accept_quality)
 
@@ -234,6 +254,8 @@ async def _download_dash(
                 "0:v:0",
                 "-map",
                 "1:a:0",
+                "-movflags",
+                "+faststart",
                 "-y",
                 save_path,
             ]
@@ -250,6 +272,8 @@ async def _download_dash(
                 "0:v:0",
                 "-map",
                 "1:a:0",
+                "-movflags",
+                "+faststart",
                 "-y",
                 save_path,
             ]
@@ -308,52 +332,108 @@ async def download_video(
     target_qn = _best_qn(accept_qn, quality) if accept_qn else quality
     logger.debug(f"PROBE 结果: accept_quality={accept_qn}, target_qn={target_qn}")
 
-    # Phase 2: 尝试单流 (fnval=0)
+    # Phase 2: 尝试单流 (fnval=0)，仅当实际质量达到目标才直接用
     merged = await _get_playurl(bvid, cid, qn=target_qn, fnval=0, cookies=cookies)
+    actual_quality = merged.get("quality")
+    fallback_durl_urls: list[str] = []
     if merged.get("durl"):
-        durl = merged["durl"][0]
-        durl_urls = _collect_urls(durl.get("url"), durl.get("backup_url"))
+        durl_urls = _collect_urls(
+            merged["durl"][0].get("url"), merged["durl"][0].get("backup_url")
+        )
         if durl_urls:
-            logger.debug("单流可用，直接 HTTP 下载")
-            return await _download_single(durl_urls, output_path)
+            if actual_quality is None or actual_quality >= target_qn:
+                return await _download_single(durl_urls, output_path)
+            fallback_durl_urls = durl_urls
 
     # Phase 3: DASH (fnval=4048)
-    logger.debug("单流不可用，走 DASH 下载")
-    dash_data = await _get_playurl(bvid, cid, qn=target_qn, fnval=4048, cookies=cookies)
-    dash = dash_data.get("dash")
-    if not dash or not dash.get("video"):
-        raise Exception(f"无法获取视频流: DASH 格式不可用 (target_qn={target_qn})")
+    try:
+        if shutil.which("ffmpeg") is None:
+            raise Exception(
+                "ffmpeg 未安装，B站 DASH 格式需要 ffmpeg 合并视频流和音频流。"
+                "安装命令：apt-get update && apt-get install ffmpeg -y"
+            )
+        dash_data = await _get_playurl(
+            bvid, cid, qn=target_qn, fnval=4048, cookies=cookies
+        )
+        dash = dash_data.get("dash")
+        if not dash or not dash.get("video"):
+            raise Exception(f"无法获取视频流: DASH 格式不可用 (target_qn={target_qn})")
 
-    videos = dash["video"]
-    audios = dash.get("audio", [])
+        videos = dash["video"]
+        audios = dash.get("audio", [])
 
-    need_reencode = not _has_avc(videos)
-    selected_video = _pick_dash_stream(videos, target_qn, prefer_avc=True)
-    if not selected_video:
-        raise Exception("DASH 响应中无可用的视频流")
+        need_reencode = not _has_avc(videos)
+        selected_video = _pick_dash_stream(videos, target_qn, prefer_avc=True)
+        if not selected_video:
+            raise Exception("DASH 响应中无可用的视频流")
 
-    selected_audio = _pick_best_audio(audios)
-    if not selected_audio:
-        raise Exception("DASH 响应中无可用的音频流")
+        selected_audio = _pick_best_audio(audios)
+        if not selected_audio:
+            raise Exception("DASH 响应中无可用的音频流")
 
-    video_urls = _collect_urls(
-        selected_video.get("baseUrl"), selected_video.get("backupUrl")
-    )
-    audio_urls = _collect_urls(
-        selected_audio.get("baseUrl"), selected_audio.get("backupUrl")
-    )
-    if not video_urls:
-        raise Exception("DASH 视频流 URL 列表为空")
-    if not audio_urls:
-        raise Exception("DASH 音频流 URL 列表为空")
+        video_urls = _collect_urls(
+            selected_video.get("baseUrl"), selected_video.get("backupUrl")
+        )
+        audio_urls = _collect_urls(
+            selected_audio.get("baseUrl"), selected_audio.get("backupUrl")
+        )
+        if not video_urls:
+            raise Exception("DASH 视频流 URL 列表为空")
+        if not audio_urls:
+            raise Exception("DASH 音频流 URL 列表为空")
 
-    codec_hint = selected_video.get("codecs", "?")
-    if need_reencode:
-        logger.info(f"视频编码 {codec_hint} 非 avc，ffmpeg 重编码为 libx264")
-    else:
-        logger.debug(f"视频编码 {codec_hint}，ffmpeg stream copy")
+        codec_hint = selected_video.get("codecs", "?")
+        if need_reencode:
+            logger.info(f"视频编码 {codec_hint} 非 avc，ffmpeg 重编码为 libx264")
+        else:
+            logger.debug(f"视频编码 {codec_hint}，ffmpeg stream copy")
 
-    return await _download_dash(video_urls, audio_urls, output_path, need_reencode)
+        return await _download_dash(video_urls, audio_urls, output_path, need_reencode)
+    except Exception as e:
+        if fallback_durl_urls:
+            logger.warning(
+                f"DASH 下载失败 ({e})，降级使用单流兜底（实际质量 {actual_quality}）"
+            )
+            return await _download_single(fallback_durl_urls, output_path)
+        raise
+
+
+async def probe_quality_plan(bvid: str, cid: int, use_login: bool = False) -> dict:
+    """探测各清晰度档位的真实码率（DASH bandwidth）。
+
+    返回 {"qualities": {qn: {"bandwidth", "width", "height", "codecs"}}, "accept_quality": []}
+    """
+    cookies = None
+    if use_login:
+        try:
+            cookies = await load_cookies()
+        except Exception as e:
+            logger.warning(f"加载 B 站 Cookie 用于探测失败: {e}")
+    try:
+        probe_data = await _get_playurl(bvid, cid, qn=120, fnval=4048, cookies=cookies)
+    except Exception as e:
+        logger.warning(f"探测清晰度码率失败: {e}")
+        return {"qualities": {}, "accept_quality": []}
+
+    accept_quality = probe_data.get("accept_quality") or []
+    dash_videos = (probe_data.get("dash") or {}).get("video") or []
+    qualities: dict = {}
+    by_id: dict = {}
+    for v in dash_videos:
+        by_id.setdefault(v.get("id"), []).append(v)
+    for qn, streams in by_id.items():
+        if qn is None:
+            continue
+        avc = [s for s in streams if str(s.get("codecs", "")).startswith("avc1")]
+        pool = avc or streams
+        best = max(pool, key=lambda s: s.get("bandwidth", 0))
+        qualities[qn] = {
+            "bandwidth": int(best.get("bandwidth", 0) or 0),
+            "width": int(best.get("width", 0) or 0),
+            "height": int(best.get("height", 0) or 0),
+            "codecs": best.get("codecs", ""),
+        }
+    return {"qualities": qualities, "accept_quality": accept_quality}
 
 
 async def download_video_with_login(

@@ -4,7 +4,7 @@ import re
 from astrbot.api import logger
 
 from .constants import REG_B23, REG_BV, REG_AV
-from .parser import parse_b23, parse_video, av2bv, UnsupportedBiliLinkError
+from .parser import parse_av, parse_b23, parse_video, UnsupportedBiliLinkError
 from .download import (
     download_video_with_login,
     download_video_no_login,
@@ -45,8 +45,7 @@ async def process_bili_video(
         elif REG_BV.search(url):
             video_info = await parse_video(REG_BV.search(url).group())
         elif REG_AV.search(url):
-            bvid = av2bv(REG_AV.search(url).group())
-            video_info = await parse_video(bvid) if bvid else None
+            video_info = await parse_av(REG_AV.search(url).group())
         else:
             logger.warning("不支持的链接格式")
             return {"error": "不支持的链接格式"}

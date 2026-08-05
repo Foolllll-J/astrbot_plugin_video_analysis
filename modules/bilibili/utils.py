@@ -33,6 +33,20 @@ def estimate_size(quality_qn: int, duration_seconds: int) -> float:
     return (bitrate_mbps * duration_seconds) / 8
 
 
+def estimate_size_with_plan(
+    quality_qn: int, duration_seconds: int, plan: dict
+) -> float:
+    """优先使用真实码率探测结果估算体积(MB)，缺失时回退静态估算。"""
+    qualities = (plan or {}).get("qualities", {}) or {}
+    # 先按本档真实带宽估算；116(1080P60) 无独立带宽时按同级 112(1080P+) 码率近似
+    best_id = max([q for q in qualities if q <= quality_qn], default=None)
+    info = qualities.get(best_id) if best_id is not None else None
+    if info and info.get("bandwidth"):
+        return (int(info["bandwidth"]) * duration_seconds) / 8 / (1024 * 1024)
+    fallback_qn = 112 if quality_qn == 116 else quality_qn
+    return estimate_size(fallback_qn, duration_seconds)
+
+
 def map_quality_to_height(quality_code: int) -> int:
     if quality_code >= 120:
         return 120

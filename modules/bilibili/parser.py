@@ -29,13 +29,45 @@ def _extract_aid(raw: str) -> str | None:
     return m.group(0) if m else None
 
 
+# av 号 → BV 号确定性转换（B站现行算法，兼容新旧 av 号，非网络请求）
+_AV2BV_ALPHABET = "FcwAPNKTMug3GV5Lj7EJnHpWsx4tb8haYeviqBz6rkCy12mUSDQX9RdoZf"
+_AV2BV_XOR = 23442827791579
+_AV2BV_MAX_AID = 1 << 51
+_AV2BV_ENCODE_MAP = (8, 7, 0, 5, 1, 3, 2, 4, 6)
+
+
 def av2bv(av: str) -> str | None:
+    """将 av 号（如 av116781352032938）转换为规范 BV 号；无法解析时返回 None。"""
     match = REG_AV.search(str(av or ""))
-    return match.group(0) if match else None
+    if not match:
+        return None
+    try:
+        aid = int(match.group(0)[2:])
+    except (ValueError, IndexError):
+        return None
+    if aid > _AV2BV_MAX_AID:
+        return None
+    bvid = [""] * 9
+    tmp = (_AV2BV_MAX_AID | aid) ^ _AV2BV_XOR
+    for i in range(9):
+        bvid[_AV2BV_ENCODE_MAP[i]] = _AV2BV_ALPHABET[tmp % 58]
+        tmp //= 58
+    return "BV1" + "".join(bvid)
+
+
+async def parse_av(av_str: str) -> BiliVideoInfo | None:
+    """av 解析：优先本地算法转 BV；算法失败/失效时回退官方 aid API。"""
+    bvid = av2bv(av_str)
+    if bvid:
+        info = await parse_video(bvid)
+        if info:
+            return info
+    return await parse_video(av_str)
 
 
 async def parse_video(bvid: str) -> BiliVideoInfo | None:
-    if REG_AV.search(str(bvid or "")):
+    bvid = str(bvid or "").strip()
+    if REG_AV.fullmatch(bvid):
         aid = _extract_aid(bvid)
         api_url = API_BY_AID.format(aid)
     else:
@@ -104,7 +136,7 @@ async def parse_b23(short_url: str) -> BiliVideoInfo | None:
                 if REG_BV.search(real_url):
                     return await parse_video(REG_BV.search(real_url).group())
                 if REG_AV.search(real_url):
-                    return await parse_video(av2bv(REG_AV.search(real_url).group()))
+                    return await parse_av(REG_AV.search(real_url).group())
                 return None
     except aiohttp.ClientError as e:
         logger.warning(f"B23 短链解析网络错误: {e}")

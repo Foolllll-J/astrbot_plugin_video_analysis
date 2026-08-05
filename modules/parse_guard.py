@@ -94,7 +94,7 @@ async def check_group_level_requirement(
 class ParseGuard:
     """解析请求限制器：滑动窗口 + 冷却 + 可选并发拦截。"""
 
-    _PARALLEL_STALE_SEC = 10 * 60
+    _PARALLEL_STALE_SEC = 5 * 60
 
     def __init__(
         self,
