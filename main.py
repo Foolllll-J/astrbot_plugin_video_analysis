@@ -1510,6 +1510,13 @@ async def auto_parse_dispatcher(
                 raw = match_bili_json.group(0)
                 url = raw.replace("\\\\", "\\").replace("\\/", "/")
 
+            # bvid/av 可能位于 query 参数中
+            if not (REG_BV.search(url) or REG_AV.search(url) or REG_B23.search(url)):
+                _fallback_id = REG_BV.search(message_str) or REG_AV.search(message_str)
+                if _fallback_id:
+                    url = _fallback_id.group(0)
+                    logger.info(f"从消息中提取到 B站视频号：{url}")
+
             parse_guard_key = None
             if not _throttle_whitelisted and not self._is_admin_event(event):
                 if not await self._check_group_level_requirement(event):

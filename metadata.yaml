@@ -1,7 +1,7 @@
 name: astrbot_plugin_video_analysis
 display_name: 媒体解析助手
 desc: 支持多平台分享链接解析与解析限制控制，可将解析内容以媒体形式发送。
-version: v1.6.1
+version: v1.6.2
 author: Foolllll
 author_url: https://github.com/Foolllll-J
 repo: https://github.com/Foolllll-J/astrbot_plugin_video_analysis
