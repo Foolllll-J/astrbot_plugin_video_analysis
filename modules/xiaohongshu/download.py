@@ -48,9 +48,14 @@ class XiaohongshuDownloader:
         base_name = _make_base_name(result.author, result.title, note_id)
 
         ordered_media = []
-        img_count = 0
 
         for i, item in enumerate(result.media_items):
+            if len(ordered_media) >= self.max_images:
+                logger.debug(
+                    f"媒体数量达到上限 {self.max_images}，跳过后续媒体。"
+                )
+                break
+
             candidate_urls: list[str] = item.get("urls") or []
             m_type = item["type"]
 
@@ -68,17 +73,12 @@ class XiaohongshuDownloader:
                 if downloaded:
                     ordered_media.append({"path": v_file, "type": "video"})
             else:
-                if img_count >= self.max_images:
-                    logger.debug(
-                        f"XHS 图片数量达到上限 {self.max_images}，跳过后续图片。"
-                    )
-                    break
                 if not candidate_urls:
                     continue
 
                 ext = ".jpg"
                 img_file = os.path.join(
-                    self.download_dir, f"{base_name}_{img_count}{ext}"
+                    self.download_dir, f"{base_name}_{len(ordered_media)}{ext}"
                 )
 
                 downloaded = False
@@ -91,7 +91,6 @@ class XiaohongshuDownloader:
 
                 if downloaded:
                     ordered_media.append({"path": img_file, "type": "image"})
-                    img_count += 1
 
         if not ordered_media:
             return {"error": "没有下载到任何媒体文件"}

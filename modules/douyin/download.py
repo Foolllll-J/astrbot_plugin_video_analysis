@@ -171,6 +171,12 @@ class DouyinDownloader:
 
         media_items = []
         for i, item in enumerate(result.media_items):
+            if len(media_items) >= self.max_images:
+                logger.debug(
+                    f"媒体数量达到上限 {self.max_images}，跳过后续媒体。"
+                )
+                break
+
             candidate_urls: list[str] = item.get("urls") or []
             m_type = item["type"]
 
@@ -201,13 +207,6 @@ class DouyinDownloader:
                 if downloaded:
                     media_items.append({"path": v_file, "type": "video"})
             else:
-                if (
-                    len([m for m in media_items if m["type"] == "image"])
-                    >= self.max_images
-                ):
-                    logger.debug(f"图片数量达到上限 {self.max_images}，跳过后续图片。")
-                    continue
-
                 img_url = candidate_urls[0] if candidate_urls else ""
                 ext = ".jpg"
                 if ".png" in img_url.lower():

@@ -176,7 +176,7 @@
     "delivery": {
         "type": "object",
         "description": "投递配置",
-        "hint": "控制媒体文件的下载大小上限、清理时间、图片数量及长文转发行为。",
+        "hint": "控制媒体文件的下载大小上限、清理时间、媒体数量及长文转发行为。",
         "items": {
             "max_video_size": {
                 "description": "最大视频大小（MB）",
@@ -202,8 +202,8 @@
                 "default": 50
             },
             "max_images": {
-                "description": "图片解析上限",
-                "hint": "设置图文作品解析的最大图片数量，超过此上限的图片将被忽略。适用于抖音与小红书。",
+                "description": "媒体解析上限",
+                "hint": "设置单个作品解析的最大媒体数量，超过此上限的媒体将被忽略。适用于抖音与小红书。",
                 "type": "int",
                 "slider": {
                     "min": 1,
