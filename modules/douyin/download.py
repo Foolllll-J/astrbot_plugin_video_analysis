@@ -2,6 +2,7 @@ import hashlib
 import os
 import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 import aiofiles
 import httpx
@@ -27,6 +28,17 @@ def _make_base_name(author: str, title: str, unique_id: str) -> str:
         if p
     ]
     return "_".join(parts)
+
+
+def _safe_url_for_log(url: str) -> str:
+    """去掉下载地址查询参数，避免日志泄露临时签名。"""
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme and parsed.netloc:
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    except Exception:
+        pass
+    return "<invalid-url>"
 
 
 class DouyinDownloader:
@@ -378,7 +390,10 @@ class DouyinDownloader:
                                     )
             return True
         except Exception as e:
-            logger.error(f"文件下载失败: {url}, 错误: {e}")
+            response = getattr(e, "response", None)
+            status = getattr(response, "status_code", None)
+            reason = f"HTTP {status}" if status else type(e).__name__
+            logger.error(f"文件下载失败: {_safe_url_for_log(url)}，{reason}")
             if os.path.exists(save_path):
                 os.remove(save_path)
             return False

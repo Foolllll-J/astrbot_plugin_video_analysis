@@ -7,6 +7,7 @@ class AwemeIdFetcher:
     _DOUYIN_VIDEO_URL_PATTERN = re.compile(r"video/([^/?]*)")
     _DOUYIN_VIDEO_URL_PATTERN_NEW = re.compile(r"[?&]vid=(\d+)")
     _DOUYIN_NOTE_URL_PATTERN = re.compile(r"note/([^/?]*)")
+    _DOUYIN_SLIDES_URL_PATTERN = re.compile(r"/(?:share/)?slides/([^/?]+)")
     _DOUYIN_DISCOVER_URL_PATTERN = re.compile(r"modal_id=([0-9]+)")
 
     @classmethod
@@ -24,6 +25,7 @@ class AwemeIdFetcher:
                 cls._DOUYIN_VIDEO_URL_PATTERN,
                 cls._DOUYIN_VIDEO_URL_PATTERN_NEW,
                 cls._DOUYIN_NOTE_URL_PATTERN,
+                cls._DOUYIN_SLIDES_URL_PATTERN,
                 cls._DOUYIN_DISCOVER_URL_PATTERN,
             ]:
                 match = pattern.search(response_url)

@@ -58,7 +58,9 @@ def _clean_video_url(url: str) -> str | None:
     return url.replace("playwm", "play")
 
 
-def _extract_urls_from_addr(play_addr: dict | None) -> list[str]:
+def _extract_urls_from_addr(
+    play_addr: dict | None, *, include_uri_fallback: bool = True
+) -> list[str]:
     """从 play_addr 提取所有候选 URL，含 url_list/urlList 两种 key + uri 兜底。"""
     if not isinstance(play_addr, dict):
         return []
@@ -70,6 +72,9 @@ def _extract_urls_from_addr(play_addr: dict | None) -> list[str]:
                 cleaned = _clean_video_url(u)
                 if cleaned and cleaned not in urls:
                     urls.append(cleaned)
+    if not include_uri_fallback:
+        return urls
+
     # 始终追加 URI 兜底（即使 url_list 非空也加）
     uri = play_addr.get("uri")
     if uri:
@@ -79,6 +84,57 @@ def _extract_urls_from_addr(play_addr: dict | None) -> list[str]:
         if fallback not in urls:
             urls.append(fallback)
     return urls
+
+
+def _extract_quality_urls(video: dict) -> list[str]:
+    """按视频质量提取所有候选地址，不按编码类型筛选。"""
+    bit_rates = video.get("bit_rate") or []
+    if not isinstance(bit_rates, list):
+        return []
+
+    quality_candidates = [
+        (
+            item.get("play_addr"),
+            item.get("bit_rate", 0),
+            _codec_compatibility_penalty(item),
+        )
+        for item in bit_rates
+        if isinstance(item, dict) and isinstance(item.get("play_addr"), dict)
+    ]
+    quality_candidates.extend(
+        (video.get(key), 0, 0)
+        for key in ("play_addr_265", "play_addr")
+        if isinstance(video.get(key), dict)
+    )
+
+    sorted_candidates = sorted(
+        quality_candidates,
+        key=lambda candidate: (
+            candidate[2],
+            -(candidate[0].get("width", 0) * candidate[0].get("height", 0)),
+            -candidate[0].get("data_size", 0),
+            -candidate[1],
+        ),
+    )
+    sorted_addrs = [addr for addr, _, _ in sorted_candidates]
+
+    urls: list[str] = []
+    for addr in sorted_addrs:
+        for url in _extract_urls_from_addr(addr, include_uri_fallback=False):
+            if url not in urls:
+                urls.append(url)
+    for addr in sorted_addrs:
+        for url in _extract_urls_from_addr(addr):
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _codec_compatibility_penalty(bit_rate: dict) -> int:
+    """将已知无法普遍解码的 ByteVC2 放到最后回退。"""
+    bytevc2 = str(bit_rate.get("is_bytevc2", "")).lower()
+    bytevc1_flag = str(bit_rate.get("is_bytevc1", "")).lower()
+    return int(bytevc2 in {"1", "true"} or bytevc1_flag == "2")
 
 
 def parse_aweme_detail(
@@ -125,9 +181,12 @@ def parse_aweme_detail(
     elif aweme_detail.get("video"):
         media_type = "video"
         video = aweme_detail["video"]
-        urls_265 = _extract_urls_from_addr(video.get("play_addr_265"))
-        urls = _extract_urls_from_addr(video.get("play_addr"))
-        merged = (urls_265 or []) + (urls or [])
+        # bit_rate 与顶层播放地址统一按实际质量排序，ByteVC2 仅作为末级回退。
+        merged = _extract_quality_urls(video)
+        if not merged:
+            urls_265 = _extract_urls_from_addr(video.get("play_addr_265"))
+            urls = _extract_urls_from_addr(video.get("play_addr"))
+            merged = (urls_265 or []) + (urls or [])
         if merged:
             media_items.append({"urls": merged, "type": "video"})
 

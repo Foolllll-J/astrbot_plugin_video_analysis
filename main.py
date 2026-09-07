@@ -319,16 +319,13 @@ class videoAnalysis(Star):
             return
         else:
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
-            logger.debug(
-                f"文件大小为 {file_size_mb:.2f} MB，最大限制为 {self.max_video_size} MB。"
+            size_limit_bypassed = (
+                self.admin_bypass_content_restrictions and self._is_admin_event(event)
             )
 
             # 1. 判断是否超出大小限制
             if (
-                not (
-                    self.admin_bypass_content_restrictions
-                    and self._is_admin_event(event)
-                )
+                not size_limit_bypassed
                 and file_size_mb > self.max_video_size
             ):
                 logger.warning(
@@ -343,6 +340,14 @@ class videoAnalysis(Star):
                         )
                     ]
             else:
+                if size_limit_bypassed:
+                    logger.debug(
+                        f"下载完成：文件大小={file_size_mb:.2f}MB，已由管理员跳过 {self.max_video_size}MB 限制。"
+                    )
+                else:
+                    logger.debug(
+                        f"下载完成：文件大小={file_size_mb:.2f}MB，限制={self.max_video_size}MB，大小校验通过。"
+                    )
                 # 视频在限制内，构建视频组件
                 nap_file_path = await self._send_file_if_needed(file_path_rel)
 
@@ -531,9 +536,14 @@ class videoAnalysis(Star):
                         break
                     temp_quality = next_q
                 target_quality = temp_quality
-            logger.debug(
-                f"智能预估：视频时长 {video_duration}s，初始质量 {initial_quality} 预估降级到 {target_quality}。"
-            )
+            if target_quality == initial_quality:
+                logger.debug(
+                    f"智能预估：视频时长={video_duration}s，目标清晰度=qn{target_quality}，无需降级。"
+                )
+            else:
+                logger.debug(
+                    f"智能预估：视频时长={video_duration}s，清晰度 qn{initial_quality} → qn{target_quality}，执行降级。"
+                )
 
         if lowest_still_over:
             logger.warning(
@@ -557,9 +567,7 @@ class videoAnalysis(Star):
 
             attempted_qualities.add(current_quality)
             download_attempts += 1
-            logger.debug(
-                f"正在尝试下载 (质量: {current_quality}，总尝试次数: {download_attempts})..."
-            )
+            logger.debug(f"下载尝试 #{download_attempts}：qn={current_quality}。")
 
             try:
                 result = await process_bili_video(
@@ -582,9 +590,6 @@ class videoAnalysis(Star):
 
             file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
             if file_size_mb <= max_size:
-                logger.debug(
-                    f"文件大小 {file_size_mb:.2f}MB 满足限制 {max_size}MB。下载成功。"
-                )
                 break
 
             # 文件超限：若可降级则继续尝试下一档清晰度
@@ -599,8 +604,8 @@ class videoAnalysis(Star):
                 next_quality = DOWNGRADE_MAP.get(current_quality)
             can_downgrade = next_quality is not None and next_quality != current_quality
             if can_downgrade:
-                logger.warning(
-                    f"后置校验失败！文件实际大小 {file_size_mb:.2f}MB 超出限制 {max_size}MB。删除文件，准备降级重试..."
+                logger.debug(
+                    f"后置大小校验：{file_size_mb:.2f}MB 超出限制 {max_size}MB，删除文件并降级到 qn{next_quality}。"
                 )
                 try:
                     os.remove(file_path_rel)

@@ -152,7 +152,7 @@ class DouyinParser:
                     return result
                 logger.debug(f"抖音解析 {strategy.name} 失败: {result.error}")
             except Exception as e:
-                logger.error(f"抖音解析 {strategy.name} 异常: {e}")
+                logger.debug(f"抖音解析 {strategy.name} 异常，继续尝试后续策略: {e}")
 
         return DouyinParseResult(
             success=False,

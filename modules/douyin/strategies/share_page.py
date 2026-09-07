@@ -44,15 +44,14 @@ class SharePageStrategy(BaseStrategy):
                 success=False, error=f"提取 aweme_id 失败: {e}", source=self.name
             )
 
-        # 如果是 /slides/ 类型，优先尝试结构化 slidesinfo API
-        if "/slides/" in extracted_url:
-            try:
-                slides_result = await self._try_slides_api(aweme_id)
-                if slides_result.success:
-                    return slides_result
-                logger.debug(f"SharePage slides API 失败: {slides_result.error}")
-            except Exception as e:
-                logger.debug(f"SharePage slides API 异常: {e}")
+        # 短链可能在 aweme_id 提取时才重定向为 /share/slides/，不能只看原始 URL。
+        try:
+            slides_result = await self._try_slides_api(aweme_id)
+            if slides_result.success:
+                return slides_result
+            logger.debug(f"SharePage slides API 失败: {slides_result.error}")
+        except Exception as e:
+            logger.debug(f"SharePage slides API 异常: {e}")
 
         # HTML 页面抓取 _ROUTER_DATA
         page_urls = [
