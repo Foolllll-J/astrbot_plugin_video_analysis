@@ -94,7 +94,8 @@ class videoAnalysis(Star):
         self.platform_whitelist: List[str] = [
             p.strip().lower()
             for p in platform_parse_config.get(
-                "platform_whitelist", ["bilibili", "douyin", "nga", "tieba"]
+                "platform_whitelist",
+                ["bilibili", "douyin", "xiaohongshu", "nga", "tieba"],
             )
             if isinstance(p, str) and p.strip()
         ]
@@ -1648,7 +1649,7 @@ async def auto_parse_dispatcher(
     if "xiaohongshu" in _enabled_platforms:
         _XHS_RE = r"[a-zA-Z0-9\-_/]+(?:\?[^\s<>\"'()]*)?"
         match_xhs = re.search(
-            r"(https?://xhslink\.com/" + _XHS_RE + r")", message_str
+            r"(https?://xhslink\.(?:com|cn)/" + _XHS_RE + r")", message_str
         ) or re.search(
             r"(https?://(?:www\.)?(?:xiaohongshu|rednote)\.com/(?:explore|discovery/item)/"
             + _XHS_RE
@@ -1659,7 +1660,7 @@ async def auto_parse_dispatcher(
         if not match_xhs:
             _XHS_RE_ESC = r"[a-zA-Z0-9\-_\\\\/]+(?:\?[^\s<>\"'()\\\\]*)?"
             match_xhs_json = re.search(
-                r"https?://xhslink\.com/" + _XHS_RE_ESC, message_obj_str
+                r"https?://xhslink\.(?:com|cn)/" + _XHS_RE_ESC, message_obj_str
             ) or re.search(
                 r"https?://(?:www\.)?(?:xiaohongshu|rednote)\.com/(?:explore|discovery/item)/"
                 + _XHS_RE_ESC,
@@ -1667,7 +1668,7 @@ async def auto_parse_dispatcher(
             )
         if not match_xhs and not match_xhs_json:
             match_xhs_json = re.search(
-                r"https?:\\\\/\\\\/xhslink\.com\\\\/" + _XHS_RE_ESC, message_obj_str
+                r"https?:\\\\/\\\\/xhslink\.(?:com|cn)\\\\/" + _XHS_RE_ESC, message_obj_str
             ) or re.search(
                 r"https?:\\\\/\\\\/(?:www\.)?(?:xiaohongshu|rednote)\\.com\\\\/(?:explore|discovery\\\\/item)\\\\/"
                 + _XHS_RE_ESC,

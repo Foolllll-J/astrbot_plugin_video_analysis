@@ -85,7 +85,7 @@ class XiaohongshuParser:
             return None
         raw_url = text_match.group(1)
 
-        if "xhslink.com" in raw_url:
+        if "xhslink.com" in raw_url or "xhslink.cn" in raw_url:
             for attempt in range(2):
                 try:
                     async with httpx.AsyncClient(

@@ -71,7 +71,7 @@ _XHS_ID_RE = re.compile(r"/(?:explore|discovery/item)/([0-9a-zA-Z]+)")
 _SHORT_HOSTS = {
     "bilibili": ("b23.tv", "bili2233.cn"),
     "douyin": ("v.douyin.com", "iesdouyin.com"),
-    "xhs": ("xhslink.com",),
+    "xhs": ("xhslink.com", "xhslink.cn"),
 }
 
 _SHORT_UA = (
