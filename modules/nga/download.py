@@ -1,12 +1,11 @@
 import hashlib
-import logging
 import os
 
 import httpx
 
-from .constants import DOWNLOAD_HEADERS, IMAGE_EXTS, TIMEOUT
+from astrbot.api import logger
 
-logger = logging.getLogger(__name__)
+from .constants import DOWNLOAD_HEADERS, IMAGE_EXTS, TIMEOUT
 
 
 class NgaDownloader:
