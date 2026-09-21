@@ -325,10 +325,7 @@ class videoAnalysis(Star):
             )
 
             # 1. 判断是否超出大小限制
-            if (
-                not size_limit_bypassed
-                and file_size_mb > self.max_video_size
-            ):
+            if not size_limit_bypassed and file_size_mb > self.max_video_size:
                 logger.warning(
                     f"视频大小超出限制。文件: {file_path_rel}，大小: {file_size_mb:.2f}MB，最大限制: {self.max_video_size}MB。"
                 )
@@ -1420,7 +1417,7 @@ class videoAnalysis(Star):
                 [
                     Plain("请使用 B站APP 扫描以下二维码登录：\n"),
                     Image.fromFileSystem(temp_image_path),
-                    Plain("\n等待登录中...（最多40秒）"),
+                    Plain("\n等待登录中...（最多150秒）"),
                 ]
             )
 
@@ -1668,7 +1665,8 @@ async def auto_parse_dispatcher(
             )
         if not match_xhs and not match_xhs_json:
             match_xhs_json = re.search(
-                r"https?:\\\\/\\\\/xhslink\.(?:com|cn)\\\\/" + _XHS_RE_ESC, message_obj_str
+                r"https?:\\\\/\\\\/xhslink\.(?:com|cn)\\\\/" + _XHS_RE_ESC,
+                message_obj_str,
             ) or re.search(
                 r"https?:\\\\/\\\\/(?:www\.)?(?:xiaohongshu|rednote)\\.com\\\\/(?:explore|discovery\\\\/item)\\\\/"
                 + _XHS_RE_ESC,

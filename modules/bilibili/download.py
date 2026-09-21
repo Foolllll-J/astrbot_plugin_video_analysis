@@ -10,7 +10,7 @@ import httpx
 from astrbot.api import logger
 
 from .constants import PLAYURL_API
-from .utils import load_cookies
+from .utils import load_cookies, get_buvid
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -53,10 +53,15 @@ async def _get_playurl(
         "platform": "pc",
         "high_quality": 1,
     }
+    b_3, b_4 = await get_buvid()
     cookie_dict = {
         "SESSDATA": (cookies or {}).get("SESSDATA", ""),
         "bili_jct": (cookies or {}).get("bili_jct", ""),
     }
+    if b_3:
+        cookie_dict["buvid3"] = b_3
+    if b_4:
+        cookie_dict["buvid4"] = b_4
     headers = {
         "User-Agent": UA,
         "Referer": "https://www.bilibili.com/",

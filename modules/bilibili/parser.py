@@ -14,7 +14,7 @@ from .constants import (
     API_BY_BVID,
 )
 from .model import BiliVideoInfo
-from .utils import bili_request, format_number
+from .utils import bili_request, format_number, build_request_cookies
 
 
 class UnsupportedBiliLinkError(Exception):
@@ -73,7 +73,7 @@ async def parse_video(bvid: str) -> BiliVideoInfo | None:
     else:
         api_url = API_BY_BVID.format(bvid)
 
-    data = await bili_request(api_url)
+    data = await bili_request(api_url, cookies=await build_request_cookies())
     if data.get("code") != 0:
         logger.warning(
             f"Bilibili API 返回错误: code={data.get('code')}, message={data.get('message', '')}"

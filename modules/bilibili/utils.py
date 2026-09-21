@@ -15,10 +15,73 @@ from .constants import (
     ESTIMATED_BITRATES_MBPS,
     DEFAULT_HEADERS,
     COOKIE_CHECK_HEADERS,
+    BUVID_API,
 )
 
 COOKIE_FILE: str | None = None
 COOKIE_VALID: bool | None = None
+
+# 登录成功后需保存的 Cookie 字段（来自轮询跳转 url 参数或 Set-Cookie）
+LOGIN_COOKIE_KEYS = {
+    "_uuid",
+    "DedeUserID",
+    "DedeUserID__ckMd5",
+    "SESSDATA",
+    "bili_jct",
+    "bili_ticket",
+    "bili_ticket_expires",
+    "CURRENT_FNVAL",
+    "CURRENT_QUALITY",
+    "enable_feed_channel",
+    "enable_web_push",
+    "header_theme_version",
+    "home_feed_column",
+    "LIVE_BUVID",
+    "PVID",
+    "browser_resolution",
+    "buvid_fp",
+    "buvid3",
+    "buvid4",
+    "fingerprint",
+}
+
+_BUVID_CACHE: tuple[str, str] | None = None
+
+
+async def get_buvid() -> tuple[str, str]:
+    """获取并缓存 buvid3/buvid4，失败时返回空元组不阻断调用。"""
+    global _BUVID_CACHE
+    if _BUVID_CACHE:
+        return _BUVID_CACHE
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(BUVID_API, headers=DEFAULT_HEADERS) as response:
+                data = await response.json()
+        b_3 = str(data.get("data", {}).get("b_3", ""))
+        b_4 = str(data.get("data", {}).get("b_4", ""))
+        if b_3 and b_4:
+            _BUVID_CACHE = (b_3, b_4)
+            return _BUVID_CACHE
+    except Exception as e:
+        logger.warning(f"获取 buvid 失败: {e}")
+    return ("", "")
+
+
+async def build_request_cookies(use_login: bool = True) -> dict:
+    """组装请求 Cookie：buvid 加上可选的登录 Cookie，降低匿名风控（412/-352）。"""
+    b_3, b_4 = await get_buvid()
+    cookies = {}
+    if b_3:
+        cookies["buvid3"] = b_3
+    if b_4:
+        cookies["buvid4"] = b_4
+    if use_login:
+        saved = await load_cookies() or {}
+        for key in ("SESSDATA", "bili_jct", "DedeUserID"):
+            if saved.get(key):
+                cookies[key] = str(saved[key])
+    return cookies
 
 
 def init_bili_module(cookie_file_path: str):
@@ -72,13 +135,15 @@ def format_number(num):
     return f"{num / 1e8:.1f}亿"
 
 
-async def bili_request(url: str, return_json: bool = True):
+async def bili_request(url: str, return_json: bool = True, cookies: dict | None = None):
     if not url or not isinstance(url, str):
         return {"code": -400, "message": "Invalid URL"}
     try:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=DEFAULT_HEADERS) as response:
+            async with session.get(
+                url, headers=DEFAULT_HEADERS, cookies=cookies or None
+            ) as response:
                 response.raise_for_status()
                 if return_json:
                     data = await response.json()
@@ -162,9 +227,19 @@ async def check_cookie_valid() -> bool:
         return False
 
 
-async def generate_qrcode() -> dict | None:
+async def generate_qrcode(session: aiohttp.ClientSession) -> dict | None:
     url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
-    data = await bili_request(url)
+    headers = {
+        **DEFAULT_HEADERS,
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    }
+    try:
+        async with session.get(url, headers=headers) as response:
+            data = await response.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.error(f"获取二维码请求失败: {e}")
+        return None
     if data.get("code") != 0:
         logger.error(f"获取二维码失败: {data.get('message')}")
         return None
@@ -183,7 +258,6 @@ async def generate_qrcode() -> dict | None:
     img.save(buffered, format="PNG")
     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-    logger.info("B站登录二维码已生成")
     return {
         "qrcode_key": qr_data["qrcode_key"],
         "image_base64": img_str,
@@ -191,86 +265,100 @@ async def generate_qrcode() -> dict | None:
     }
 
 
-async def check_login_status(qrcode_key: str) -> dict:
+async def check_login_status(session: aiohttp.ClientSession, qrcode_key: str) -> dict:
     url = f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Accept-Encoding": "gzip, deflate",
+        **DEFAULT_HEADERS,
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                return await response.json()
+        async with session.get(url, headers=headers) as response:
+            return await response.json()
     except aiohttp.ClientError:
         return {"code": -1, "message": "检查登录状态失败"}
 
 
-async def check_login_status_loop(qrcode_key: str) -> dict | None:
-    logger.info("等待登录...（最多40秒）")
-    for _ in range(40):
+def _collect_login_cookies(session: aiohttp.ClientSession, redirect_url: str) -> dict:
+    """从轮询跳转 url 参数和 session cookie jar 两处合并登录 Cookie。
+
+    B站可能把 SESSDATA/bili_jct/DedeUserID 放在 url 参数或 Set-Cookie 头里，
+    两处都读才能兼容不同账号与风控状态。
+    """
+    cookies: dict = {}
+    if "?" in redirect_url:
+        for param in redirect_url.split("?", 1)[1].split("&"):
+            if "=" in param:
+                key, value = param.split("=", 1)
+                if key in LOGIN_COOKIE_KEYS:
+                    cookies[key] = unquote(value)
+    for morsel in session.cookie_jar:
+        if morsel.key in LOGIN_COOKIE_KEYS and morsel.value:
+            cookies[morsel.key] = unquote(morsel.value)
+    return cookies
+
+
+async def check_login_status_loop(
+    session: aiohttp.ClientSession, qrcode_key: str
+) -> dict | None:
+    logger.info("等待登录...（最多150秒）")
+    last_code = None
+    for _ in range(150):
         await asyncio.sleep(1)
-        status = await check_login_status(qrcode_key)
-        if status.get("code") == 0:
-            data = status.get("data", {})
-            if data.get("code") == 0:
-                logger.info("B站登录成功!")
-                try:
-                    url = data.get("url", "")
-                    cookies = {}
-                    if "?" in url:
-                        url_params = url.split("?")[1]
-                        for param in url_params.split("&"):
-                            if "=" in param:
-                                key, value = param.split("=", 1)
-                                useful_keys = [
-                                    "_uuid",
-                                    "DedeUserID",
-                                    "DedeUserID__ckMd5",
-                                    "SESSDATA",
-                                    "bili_jct",
-                                    "bili_ticket",
-                                    "bili_ticket_expires",
-                                    "CURRENT_FNVAL",
-                                    "CURRENT_QUALITY",
-                                    "enable_feed_channel",
-                                    "enable_web_push",
-                                    "header_theme_version",
-                                    "home_feed_column",
-                                    "LIVE_BUVID",
-                                    "PVID",
-                                    "browser_resolution",
-                                    "buvid_fp",
-                                    "buvid3",
-                                    "fingerprint",
-                                ]
-                                if key in useful_keys:
-                                    cookies[key] = unquote(value)
-                        if not cookies.get("SESSDATA") or not cookies.get("DedeUserID"):
-                            raise ValueError("获取的 Cookie 格式异常")
-                        await save_cookies_dict(cookies)
-                        return cookies
-                    else:
-                        raise ValueError("URL 格式异常，无法提取参数")
-                except Exception as e:
-                    logger.error(f"登录异常: {e}")
-                    logger.debug(f"原始响应数据: {data}")
-                    return None
-            elif data.get("code") == -2:
-                logger.warning("二维码已过期，请重新获取")
+        status = await check_login_status(session, qrcode_key)
+        if status.get("code") != 0:
+            continue
+        data = status.get("data", {})
+        poll_code = data.get("code")
+        if poll_code == 0:
+            logger.info("B站登录成功!")
+            try:
+                cookies = _collect_login_cookies(session, data.get("url", ""))
+                if not cookies.get("SESSDATA") or not cookies.get("DedeUserID"):
+                    found = ",".join(sorted(cookies)) or "无"
+                    raise ValueError(f"未取到 SESSDATA/DedeUserID，已获取字段: {found}")
+                await save_cookies_dict(cookies)
+                return cookies
+            except Exception as e:
+                logger.error(f"登录异常: {e}")
                 return None
-            elif data.get("code") in (-4, -5):
-                logger.debug("等待手机上确认登录")
+        elif poll_code in (86038, 86105):
+            logger.warning("二维码已过期，请重新获取")
+            return None
+        elif poll_code != last_code:
+            # 仅在状态变化时记录，避免每秒刷同一条
+            msg = {86090: "已扫码，等待手机确认", 86101: "等待扫码"}.get(
+                poll_code, f"轮询返回未知状态码: {poll_code}"
+            )
+            logger.debug(msg)
+        last_code = poll_code
     logger.warning("登录超时，请重试")
     return None
 
 
 async def bili_login() -> tuple:
     logger.info("正在生成 B站 登录二维码...")
-    qr_data = await generate_qrcode()
+    # generate 与 poll 共用一个 session，让登录时下发的 buvid 自动接力到轮询请求
+    timeout = aiohttp.ClientTimeout(total=20)
+    session = aiohttp.ClientSession(timeout=timeout)
+    try:
+        qr_data = await generate_qrcode(session)
+    except Exception as e:
+        await session.close()
+        logger.error(f"生成二维码异常: {e}")
+        return None, None
     if not qr_data:
+        await session.close()
         return None, None
 
     logger.info("B站 登录二维码已生成，等待扫码...")
     qrcode_key = qr_data["qrcode_key"]
-    login_task = asyncio.create_task(check_login_status_loop(qrcode_key))
+
+    async def _run() -> dict | None:
+        try:
+            return await check_login_status_loop(session, qrcode_key)
+        finally:
+            await session.close()
+
+    login_task = asyncio.create_task(_run())
     return login_task, qr_data
