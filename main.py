@@ -1493,7 +1493,7 @@ async def auto_parse_dispatcher(
         match_bili = re.search(
             r"(https?://b23\.tv/[\w]+|"
             r"https?://bili2233\.cn/[\w]+|"
-            r"BV1\w{9}|av\d+|"
+            r"(?<![A-Za-z0-9])(?:BV1\w{9}|av\d+)(?![A-Za-z0-9])|"
             r"https?://(?:live|t|space|www|m)\.bilibili\.com/[\w/]+)",
             message_str,
         )

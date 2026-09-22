@@ -16,8 +16,8 @@ ESTIMATED_BITRATES_MBPS = {
 }
 
 REG_B23 = re.compile(r"(b23\.tv|bili2233\.cn)\/[\w]+")
-REG_BV = re.compile(r"BV1\w{9}")
-REG_AV = re.compile(r"av\d+", re.I)
+REG_BV = re.compile(r"(?<![A-Za-z0-9])BV1\w{9}(?![A-Za-z0-9])")
+REG_AV = re.compile(r"(?<![A-Za-z0-9])av\d+(?![A-Za-z0-9])", re.I)
 REG_BILI_LIVE = re.compile(r"(?:^https?://)?(?:m\.)?live\.bilibili\.com(?:/|$)", re.I)
 REG_BILI_DYNAMIC = re.compile(
     r"(?:^https?://)?(?:"
