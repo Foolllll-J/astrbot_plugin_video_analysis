@@ -138,7 +138,14 @@ class DouyinDownloader:
         )
         limit_bytes = self.max_size * 1024 * 1024
         best_size = (sorted_rates[0].get("play_addr") or {}).get("data_size") or 0
-        if not best_size or best_size <= limit_bytes:
+        if not best_size:
+            logger.debug("抖音智能预估：最高档 data_size 未知，跳过预选。")
+            return []
+        if best_size <= limit_bytes:
+            logger.debug(
+                f"抖音智能预估：最高档 data_size={best_size / 1048576:.2f}MB "
+                f"未超上限 {self.max_size}MB，无需降级。"
+            )
             return []
         for tier in sorted_rates[1:]:
             pa = tier.get("play_addr", {}) or {}
@@ -147,7 +154,18 @@ class DouyinDownloader:
                 continue
             urls = pa.get("url_list") or pa.get("urlList") or []
             cleaned = [_clean_video_url(u) for u in urls if isinstance(u, str)]
-            return [u for u in cleaned if u]
+            cleaned = [u for u in cleaned if u]
+            if cleaned:
+                logger.debug(
+                    f"抖音智能预估：最高档 data_size={best_size / 1048576:.2f}MB 超出上限 "
+                    f"{self.max_size}MB，预选 {pa.get('width', 0)}x{pa.get('height', 0)} 档"
+                    f"（data_size={size / 1048576:.2f}MB）替代。"
+                )
+            return cleaned
+        logger.debug(
+            f"抖音智能预估：最高档 data_size={best_size / 1048576:.2f}MB 超出上限 "
+            f"{self.max_size}MB，且无可容纳档，交由下载后校验处理。"
+        )
         return []
 
     def video_all_qualities_over_limit(self, result: DouyinParseResult) -> bool:
@@ -174,6 +192,18 @@ class DouyinDownloader:
                 return False  # 存在可容纳档
         return True
 
+    def _video_size_ok(self, path: str) -> bool:
+        """下载后体积校验，超限返回 False。"""
+        if not self.smart_downgrade or self.max_size <= 0:
+            return True
+        return os.path.getsize(path) / (1024 * 1024) <= self.max_size
+
+    def _remove_file(self, path: str) -> None:
+        try:
+            os.remove(path)
+        except OSError as e:
+            logger.warning(f"删除文件失败: {e}")
+
     async def _download_local(self, result: DouyinParseResult, url: str) -> dict:
         aweme_id = result.aweme_id or hashlib.md5(url.encode()).hexdigest()
         title = result.title
@@ -198,22 +228,60 @@ class DouyinDownloader:
                 downloaded = False
 
                 preselect_urls = self._preselect_video_urls(result) if i == 0 else []
-                ordered_urls = [u for u in preselect_urls if u not in candidate_urls]
-                ordered_urls += candidate_urls
+                # 预选地址必然已包含在候选列表中，须先置顶再排除，否则顺序不变
+                ordered_urls = list(preselect_urls) + [
+                    u for u in candidate_urls if u not in preselect_urls
+                ]
 
-                for c_url in ordered_urls:
-                    if os.path.exists(v_file):
+                # 体积校验与降级只作用于主视频，图集视频段沿用原有直下逻辑
+                check_size = i == 0 and self.smart_downgrade
+
+                if os.path.exists(v_file):
+                    if not check_size or self._video_size_ok(v_file):
                         downloaded = True
-                        break
-                    if await self._try_download_one(c_url, v_file, "抖音"):
-                        downloaded = True
-                        break
+                    else:
+                        # 残留的超限文件与当前清晰度同名，直接复用会让降级失效
+                        logger.debug(
+                            f"抖音后置大小校验：残留文件 "
+                            f"{os.path.getsize(v_file) / 1048576:.2f}MB 超出限制 "
+                            f"{self.max_size}MB，删除后重新下载。"
+                        )
+                        self._remove_file(v_file)
+
+                oversize_hit = False
+                if not downloaded:
+                    for c_url in ordered_urls:
+                        if await self._try_download_one(c_url, v_file, "抖音"):
+                            if not check_size or self._video_size_ok(v_file):
+                                downloaded = True
+                                break
+                            oversize_hit = True
+                            logger.debug(
+                                f"抖音后置大小校验："
+                                f"{os.path.getsize(v_file) / 1048576:.2f}MB 超出限制 "
+                                f"{self.max_size}MB，删除文件并尝试下一档。"
+                            )
+                            self._remove_file(v_file)
+                            # 已确认该档超限，转交按档位降级的路径，避免同档多个 CDN 地址各下一遍
+                            if i == 0 and result.video_bit_rate:
+                                break
 
                 if not downloaded and i == 0 and result.video_bit_rate:
                     dl_result = await self._download_with_downgrade(
                         url, v_file, result.video_bit_rate, title, author, duration
                     )
-                    if dl_result or os.path.exists(v_file):
+                    if dl_result:
+                        downloaded = True
+                    elif os.path.exists(v_file) and self._video_size_ok(v_file):
+                        downloaded = True
+
+                if not downloaded and oversize_hit and i == 0:
+                    # 所有清晰度都超限：重新落一份文件，交由上层给出明确的体积提示
+                    logger.warning(
+                        f"抖音降级失败：所有清晰度均超出限制 "
+                        f"{self.max_size}MB，保留文件交由上层提示。"
+                    )
+                    if await self._try_download_one(ordered_urls[0], v_file, "抖音"):
                         downloaded = True
 
                 if downloaded:
@@ -322,7 +390,9 @@ class DouyinDownloader:
                 and data_size
                 and data_size > self.max_size * 1024 * 1024
             ):
-                logger.debug(f"抖音降级：跳过 data_size={data_size}B 超限档")
+                logger.debug(
+                    f"抖音降级：跳过 data_size={data_size / 1048576:.2f}MB 超限档"
+                )
                 continue
             quality_url = _clean_video_url(url_list[0])
 
@@ -335,9 +405,18 @@ class DouyinDownloader:
 
             file_size_mb = os.path.getsize(final_file) / (1024 * 1024)
             if file_size_mb > self.max_size and self.smart_downgrade:
+                logger.debug(
+                    f"抖音降级：{file_size_mb:.2f}MB 仍超限 "
+                    f"{self.max_size}MB，继续降档。"
+                )
                 os.remove(final_file)
                 continue
 
+            logger.debug(
+                f"抖音降级成功："
+                f"{play_addr.get('width', 0)}x{play_addr.get('height', 0)} 档 "
+                f"{file_size_mb:.2f}MB（限制 {self.max_size}MB）。"
+            )
             return {
                 "title": title,
                 "author": author,
@@ -346,6 +425,7 @@ class DouyinDownloader:
                 "duration": duration,
             }
 
+        logger.debug("抖音降级：无满足限制的档位，交由后续处理。")
         return None
 
     async def _download_file(self, url: str, save_path: str) -> bool:
