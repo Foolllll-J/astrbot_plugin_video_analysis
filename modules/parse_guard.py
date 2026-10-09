@@ -70,6 +70,30 @@ async def check_group_level_requirement(
     try:
         group_id = int(event.get_group_id())
         user_id = int(event.get_sender_id())
+    except (TypeError, ValueError):
+        logger_obj.warning("群号或用户 ID 非数字，默认放行视频解析")
+        return True
+
+    # Fast path: OneBot 群消息自带 sender.level/role，命中则零 API 开销。
+    # 字段缺失时才回退到 get_group_member_info。
+    try:
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        sender = raw.get("sender") if hasattr(raw, "get") else None
+        if isinstance(sender, dict):
+            if str(sender.get("role") or "") in {"owner", "admin"}:
+                return True
+            if sender.get("level") is not None:
+                level = int(sender.get("level"))
+                if level < threshold:
+                    logger_obj.debug(
+                        f"群成员等级不足，已跳过视频解析：群号={group_id}，用户={user_id}，当前等级={level}，要求等级={threshold}"
+                    )
+                    return False
+                return True
+    except Exception:
+        pass
+
+    try:
         info = await event.bot.api.call_action(
             "get_group_member_info",
             group_id=group_id,
