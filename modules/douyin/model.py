@@ -42,6 +42,18 @@ class StrategyResult:
 _AUDIO_EXT_RE = re.compile(r"\.(mp3|m4a|aac|wav|flac|ogg)(\?|$)", re.I)
 
 
+def _is_bytevc2(tier: dict) -> bool:
+    """ByteVC2 为字节私有编码，标准客户端无法解码，需跳过。
+
+    is_bytevc1 取值：0=H.264、1=HEVC、2=ByteVC2。
+    """
+    if not isinstance(tier, dict):
+        return False
+    if str(tier.get("is_bytevc2", "")).strip().lower() in {"1", "true"}:
+        return True
+    return str(tier.get("is_bytevc1", "")).strip().lower() == "2"
+
+
 def _clean_video_url(url: str) -> str | None:
     if not url or not isinstance(url, str):
         return None
@@ -87,22 +99,20 @@ def _extract_urls_from_addr(
 
 
 def _extract_quality_urls(video: dict) -> list[str]:
-    """按视频质量提取所有候选地址，不按编码类型筛选。"""
+    """按视频质量提取所有候选地址，跳过 ByteVC2。"""
     bit_rates = video.get("bit_rate") or []
     if not isinstance(bit_rates, list):
         return []
 
     quality_candidates = [
-        (
-            item.get("play_addr"),
-            item.get("bit_rate", 0),
-            _codec_compatibility_penalty(item),
-        )
+        (item.get("play_addr"), item.get("bit_rate", 0))
         for item in bit_rates
-        if isinstance(item, dict) and isinstance(item.get("play_addr"), dict)
+        if isinstance(item, dict)
+        and isinstance(item.get("play_addr"), dict)
+        and not _is_bytevc2(item)
     ]
     quality_candidates.extend(
-        (video.get(key), 0, 0)
+        (video.get(key), 0)
         for key in ("play_addr_265", "play_addr")
         if isinstance(video.get(key), dict)
     )
@@ -110,13 +120,12 @@ def _extract_quality_urls(video: dict) -> list[str]:
     sorted_candidates = sorted(
         quality_candidates,
         key=lambda candidate: (
-            candidate[2],
             -(candidate[0].get("width", 0) * candidate[0].get("height", 0)),
             -candidate[0].get("data_size", 0),
             -candidate[1],
         ),
     )
-    sorted_addrs = [addr for addr, _, _ in sorted_candidates]
+    sorted_addrs = [addr for addr, _ in sorted_candidates]
 
     urls: list[str] = []
     for addr in sorted_addrs:
@@ -128,13 +137,6 @@ def _extract_quality_urls(video: dict) -> list[str]:
             if url not in urls:
                 urls.append(url)
     return urls
-
-
-def _codec_compatibility_penalty(bit_rate: dict) -> int:
-    """将已知无法普遍解码的 ByteVC2 放到最后回退。"""
-    bytevc2 = str(bit_rate.get("is_bytevc2", "")).lower()
-    bytevc1_flag = str(bit_rate.get("is_bytevc1", "")).lower()
-    return int(bytevc2 in {"1", "true"} or bytevc1_flag == "2")
 
 
 def parse_aweme_detail(

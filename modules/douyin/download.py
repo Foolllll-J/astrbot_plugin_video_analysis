@@ -9,7 +9,7 @@ import httpx
 
 from astrbot.api import logger
 
-from .model import DouyinParseResult, _clean_video_url
+from .model import DouyinParseResult, _clean_video_url, _is_bytevc2
 from .constants import DOWNLOAD_HEADERS, DOWNLOAD_TIMEOUT
 
 
@@ -123,7 +123,7 @@ class DouyinDownloader:
         """
         if not self.smart_downgrade or self.max_size <= 0:
             return []
-        br = result.video_bit_rate or []
+        br = [x for x in (result.video_bit_rate or []) if not _is_bytevc2(x)]
         if not br:
             return []
         sorted_rates = sorted(
@@ -172,7 +172,7 @@ class DouyinDownloader:
         """最低清晰度仍超限：所有已知码率档的 data_size 都超过大小限制。
 
         仅当所有档位 data_size 均已知且全部超限时返回 True；任何一档大小未知
-        或存在可容纳档时返回 False，交由正常下载逻辑处理。
+        或存在可容纳档时返回 False，交由正常下载逻辑处理。ByteVC2 档不参与判断。
         """
         if not self.smart_downgrade or self.max_size <= 0:
             return False
@@ -181,6 +181,7 @@ class DouyinDownloader:
             raw = result.raw_data or {}
             video = (raw.get("data") or {}).get("video") or {}
             br = video.get("bit_rate") or []
+        br = [tier for tier in br if not _is_bytevc2(tier)]
         if not br:
             return False
         limit_bytes = self.max_size * 1024 * 1024
@@ -368,6 +369,7 @@ class DouyinDownloader:
         author: str,
         duration: float,
     ) -> dict | None:
+        bit_rate = [br for br in bit_rate if not _is_bytevc2(br)]
         sorted_rates = sorted(
             bit_rate,
             key=lambda x: (
