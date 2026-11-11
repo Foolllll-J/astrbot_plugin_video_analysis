@@ -1,3 +1,4 @@
 gmssl>=3.2.2
 protobuf>=4.21.1,<8
 SignerPy>=0.12.0
+xhshow>=0.2.0

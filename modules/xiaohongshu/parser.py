@@ -1,12 +1,22 @@
 import asyncio
+import base64
 import json
+import os
+import random
 import re
+import time
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 
 import httpx
 
 from astrbot.api import logger
+
+try:
+    from xhshow import Xhshow
+except Exception:  # 可选依赖，缺失或不可用时跳过游客 session，退回匿名请求
+    Xhshow = None
+    logger.debug("xhshow 不可用，小红书游客 session 功能已跳过")
 
 from .model import XiaohongshuParseResult
 from .constants import ANDROID_UA, PC_UA, BASE_HEADERS, DEFAULT_TIMEOUT
@@ -18,18 +28,117 @@ _INIT_STATE_RE = re.compile(
 
 _PICASSO_RE = re.compile(r"picasso-static|fe-platform")
 
-LOGIN_INDICATORS = [
-    "用户登录",
-    "登录后查看",
-    "请登录",
-    "login",
-]
+# 登录墙/风控页判定特征。正常笔记页 JS 亦含 "login"，不可作为判定依据。
+LOGIN_URL_MARKERS = ("/login", "website-login", "/captcha")
+LOGIN_HTML_MARKERS = ("fe-login", "verifyuuid", "登录后查看", "请输入验证码")
+
+# 笔记路径中的 24 位 note id：/explore/、/discovery/item/、/note/
+NOTE_ID_RE = re.compile(r"/(?:explore|discovery/item|note)/([0-9a-fA-F]{24})")
+
+# __INITIAL_STATE__ 中位于值位置的 JS undefined，如 "firstVisitUrl":undefined
+_JS_UNDEFINED_RE = re.compile(r"(?<=[:,\[])\s*undefined\b")
+
+# 值位置的 JS 集合字面量，如 "AiNoteDetailStore":{"noteDetailMap":new Map([])}
+_JS_COLLECTION_RE = re.compile(r"new (?:Map|Set)\([^)]*\)")
+
+# 游客 session 获取接口与缓存时长（秒）
+_GUEST_ACTIVATE_URI = "/api/sns/web/v1/login/activate"
+_GUEST_TTL = 1800
+_guest_lock = asyncio.Lock()
+_guest_cookies: dict[str, str] = {}
+_guest_ts = 0.0
+
+
+def _loads_state(raw: str) -> dict:
+    """解析 __INITIAL_STATE__，兼容 undefined 与 new Map([])/new Set([]) 等 JS 字面量。"""
+    text = _JS_UNDEFINED_RE.sub(" null", raw)
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        sanitized = _JS_COLLECTION_RE.sub("{}", text)
+        if sanitized == text:
+            raise
+        return json.loads(sanitized, strict=False)
+
+
+# 页面请求最小间隔：匿名抓取的限额约为 10 秒内 5 次请求，超出即跳登录页
+_FETCH_LOCK = asyncio.Lock()
+_MIN_FETCH_INTERVAL = 2.0
+_last_fetch_ts = 0.0
+
+
+async def _throttle_fetch() -> None:
+    global _last_fetch_ts
+    async with _FETCH_LOCK:
+        gap = _MIN_FETCH_INTERVAL - (time.monotonic() - _last_fetch_ts)
+        if gap > 0:
+            await asyncio.sleep(gap)
+        _last_fetch_ts = time.monotonic()
+
+
+async def _get_guest_cookies() -> dict[str, str]:
+    """获取游客 web_session：由 xhshow 生成 a1/webId 并签名，无需用户 Cookie。
+
+    xhshow 为可选依赖，未安装或获取失败时返回空字典，调用方退回匿名请求。
+    """
+    global _guest_cookies, _guest_ts
+    if Xhshow is None:
+        return {}
+    async with _guest_lock:
+        if _guest_cookies and time.monotonic() - _guest_ts < _GUEST_TTL:
+            return _guest_cookies
+        try:
+            xh = Xhshow()
+            a1 = xh.generate_a1()
+            cookies = {
+                "a1": a1,
+                "webId": xh.generate_web_id(a1),
+                "xsecappid": "xhs-pc-web",
+            }
+            payload = {
+                "client_public_key_base64": base64.b64encode(os.urandom(32)).decode()
+            }
+            headers = xh.sign_headers_post(
+                _GUEST_ACTIVATE_URI, cookies, payload=payload
+            )
+            headers.update(
+                {
+                    "User-Agent": PC_UA,
+                    "Content-Type": "application/json;charset=UTF-8",
+                    "Origin": "https://www.xiaohongshu.com",
+                    "Referer": "https://www.xiaohongshu.com/",
+                }
+            )
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+                resp = await client.post(
+                    f"https://edith.xiaohongshu.com{_GUEST_ACTIVATE_URI}",
+                    headers=headers,
+                    content=xh.build_json_body(payload),
+                    cookies=cookies,
+                )
+            session = resp.cookies.get("web_session")
+            if not session:
+                try:
+                    session = ((resp.json() or {}).get("data") or {}).get("session")
+                except ValueError:
+                    session = None
+            if not session:
+                logger.warning(f"XHS 游客 session 获取失败: {resp.status_code}")
+                return {}
+            _guest_cookies = {**cookies, "web_session": session}
+            _guest_ts = time.monotonic()
+            logger.debug("XHS 游客 session 获取成功")
+            return _guest_cookies
+        except Exception as e:
+            logger.warning(f"XHS 游客 session 获取异常: {e}")
+            return {}
 
 
 class XiaohongshuParser:
     def __init__(self, cookie: str = "", prefer_original: bool = True):
         self.cookie = cookie
         self.prefer_original = prefer_original
+        self._cookie_suspect = False
 
     _LIVE_URL_RE = re.compile(r"/livestream/|/live/")
 
@@ -50,22 +159,32 @@ class XiaohongshuParser:
                 success=False, error="该链接为小红书直播间，暂不支持下载"
             )
 
-        html = await self._fetch_page(resolved_url)
+        html, final_url = await self._fetch_page(resolved_url)
         if not html:
             return XiaohongshuParseResult(
                 success=False,
-                error="无法获取页面内容，该页面可能需要登录后查看",
+                error="无法获取页面内容（请求被拦截或网络异常），请稍后重试",
+            )
+
+        if "/404/sec" in final_url:
+            return XiaohongshuParseResult(
+                success=False,
+                error="小红书风控拦截：本次访问被判定为异常流量，请稍后重试",
+            )
+
+        if self._is_login_wall(final_url, html):
+            hint = (
+                "（配置的 Cookie 疑似失效，请重新获取）"
+                if self._cookie_suspect
+                else "（可配置 Cookie 提升成功率）"
+            )
+            return XiaohongshuParseResult(
+                success=False,
+                error=f"小红书风控拦截：页面被重定向到登录/验证页，请稍后重试{hint}",
             )
 
         state = self._extract_state(html)
         if not state:
-            lower = html.lower()
-            for keyword in LOGIN_INDICATORS:
-                if keyword in lower:
-                    return XiaohongshuParseResult(
-                        success=False,
-                        error="该笔记需要登录后查看",
-                    )
             return XiaohongshuParseResult(
                 success=False,
                 error="解析失败：未找到笔记数据",
@@ -77,7 +196,24 @@ class XiaohongshuParser:
                 error="该笔记不存在或已删除",
             )
 
-        return self._parse_state(state, resolved_url)
+        result = self._parse_state(state, resolved_url)
+        if not result.success and result.error == "未找到笔记数据":
+            # noteDetailMap 偶发为空，重取一次
+            logger.debug("XHS noteDetailMap 为空，重试一次")
+            html, _ = await self._fetch_page(resolved_url)
+            if html:
+                state = self._extract_state(html)
+                if state:
+                    result = self._parse_state(state, resolved_url)
+        return result
+
+    @staticmethod
+    def _is_login_wall(final_url: str, html: str) -> bool:
+        low_url = (final_url or "").lower()
+        if any(marker in low_url for marker in LOGIN_URL_MARKERS):
+            return True
+        low = html.lower()
+        return any(marker in low for marker in LOGIN_HTML_MARKERS)
 
     async def _resolve_url(self, url: str) -> str | None:
         text_match = re.search(r"(https?://[^\s]+)", url)
@@ -98,7 +234,7 @@ class XiaohongshuParser:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         location = resp.headers.get("Location", "")
                         if location:
-                            return unquote(location)
+                            return self._clean_url(unquote(location))
                 except (
                     httpx.HTTPError,
                     httpx.TimeoutException,
@@ -115,7 +251,7 @@ class XiaohongshuParser:
                     resp = await client.get(
                         raw_url, headers={"User-Agent": ANDROID_UA, **BASE_HEADERS}
                     )
-                    return str(resp.url)
+                    return self._clean_url(str(resp.url))
             except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError) as e:
                 logger.warning(f"XHS 短链接全链跟随失败: {e}")
                 return None
@@ -123,66 +259,118 @@ class XiaohongshuParser:
         return self._clean_url(raw_url)
 
     def _clean_url(self, url: str) -> str:
+        """归一化为 /explore/<note_id>?xsec_token=...&xsec_source=pc_share
+
+        App 分享的 /discovery/item/ 与 xsec_source=app_share 会被重定向至登录/验证页，
+        仅 PC 的 explore 形态返回含 __INITIAL_STATE__ 的 SSR 页面。
+        """
         parsed = urlparse(url)
         if (
             "xiaohongshu.com" not in parsed.netloc
             and "rednote.com" not in parsed.netloc
         ):
             return url
-        path = parsed.path
-        if "/explore/" in path or "xsec_source=pc" in url:
-            return url
-        if "/discovery/item/" in path:
-            qs = parse_qs(parsed.query)
-            qs.pop("source", None)
-            qs.pop("xhsshare", None)
-            new_qs = urlencode(qs, doseq=True) if qs else ""
-            return urlunparse(parsed._replace(query=new_qs))
+
+        qs = parse_qs(parsed.query)
+        token = (qs.get("xsec_token") or [""])[0]
+        note_id_match = NOTE_ID_RE.search(parsed.path)
+
+        if note_id_match:
+            path = f"/explore/{note_id_match.group(1)}"
+            new_qs = {"xsec_token": token, "xsec_source": "pc_share"} if token else {}
+            return urlunparse(
+                parsed._replace(path=path, query=urlencode(new_qs) if new_qs else "")
+            )
+
         return url
 
-    async def _fetch_page(self, url: str) -> str | None:
-        is_pc = "/explore/" in url or "xsec_source=pc" in url
-        ua = PC_UA if is_pc else ANDROID_UA
-        headers = {"User-Agent": ua, **BASE_HEADERS}
-        if is_pc:
-            headers["Sec-CH-UA-Mobile"] = "?0"
-            headers["Sec-CH-UA-Platform"] = '"Windows"'
+    async def _fetch_page(self, url: str) -> tuple[str | None, str]:
+        # 统一 PC UA：Android UA 与 app_share 来源均被重定向至登录墙
+        headers = {
+            "User-Agent": PC_UA,
+            "Sec-CH-UA-Mobile": "?0",
+            "Sec-CH-UA-Platform": '"Windows"',
+            "Referer": "https://www.xiaohongshu.com/",
+            **BASE_HEADERS,
+            # PC 需完整的 Chrome Accept，通用 Accept 易被判验证页
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8,"
+                "application/signed-exchange;v=b3;q=0.7"
+            ),
+        }
 
-        cookies = {}
+        cookie_dict = {}
         if self.cookie:
             for pair in self.cookie.split(";"):
                 pair = pair.strip()
                 if "=" in pair:
                     k, v = pair.split("=", 1)
-                    cookies[k.strip()] = v.strip()
+                    cookie_dict[k.strip()] = v.strip()
 
-        for attempt in range(2):
+        async def fetch(cookies: dict | None) -> tuple[str | None, str]:
+            await _throttle_fetch()
             try:
                 async with httpx.AsyncClient(
                     timeout=DEFAULT_TIMEOUT,
                     follow_redirects=True,
-                    cookies=cookies or None,
+                    cookies=cookies,
                 ) as client:
                     resp = await client.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        return resp.text
-                    if attempt == 0 and resp.status_code in (301, 302, 303, 307, 308):
-                        url = str(resp.url)
-                        continue
-                    logger.warning(f"XHS 页面返回 {resp.status_code}")
-                    return None
             except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError) as e:
-                logger.warning(f"XHS 页面请求失败 (attempt {attempt + 1}): {e}")
-                if attempt == 0:
-                    await asyncio.sleep(1)
-        return None
+                logger.warning(f"XHS 页面请求失败: {e}")
+                return None, url
+            final = str(resp.url)
+            if resp.status_code != 200:
+                logger.warning(f"XHS 页面返回 {resp.status_code}")
+                return None, final
+            return resp.text, final
+
+        def usable(html: str | None, final_url: str) -> bool:
+            return bool(html) and not self._is_login_wall(final_url, html)
+
+        def done(
+            source: str, html: str | None, final_url: str
+        ) -> tuple[str | None, str]:
+            logger.debug(f"XHS 页面获取成功（{source}）{urlparse(final_url).path}")
+            return html, final_url
+
+        final_url = url
+        # 1) 配置的 Cookie；失效时会被判登录，需降级
+        if cookie_dict:
+            html, final_url = await fetch(cookie_dict)
+            if usable(html, final_url):
+                return done("配置 Cookie", html, final_url)
+            self._cookie_suspect = True
+            logger.warning(
+                "XHS 带 Cookie 请求被重定向至登录页，疑 Cookie 失效，改用游客/匿名请求重试"
+            )
+            await asyncio.sleep(0.6)
+
+        # 2) 游客 session：有效会话的风控阈值高于匿名
+        guest = await _get_guest_cookies()
+        if guest:
+            html, final_url = await fetch(guest)
+            if usable(html, final_url):
+                return done("游客 session", html, final_url)
+            logger.debug(f"XHS 游客 session 仍被拦截: {final_url}")
+
+        # 3) 匿名；限额按时间窗滚动，退避需覆盖一个窗口
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(2.5 + random.uniform(0.3, 1.0))
+            html, final_url = await fetch(None)
+            if usable(html, final_url):
+                return done("匿名", html, final_url)
+            logger.debug(f"XHS 匿名请求被拦截 (attempt {attempt + 1}): {final_url}")
+        return html, final_url
 
     def _extract_state(self, html: str) -> dict | None:
         match = _INIT_STATE_RE.search(html)
         if match:
-            raw = match.group(1).replace("undefined", "null")
+            raw = match.group(1)
             try:
-                return json.loads(raw)
+                return _loads_state(raw)
             except json.JSONDecodeError as e:
                 logger.debug(f"XHS __INITIAL_STATE__ regex JSON 解析失败: {e}")
 
@@ -221,9 +409,9 @@ class XiaohongshuParser:
                 elif ch == "}":
                     depth -= 1
                     if depth == 0:
-                        raw = html[brace_start : i + 1].replace("undefined", "null")
+                        raw = html[brace_start : i + 1]
                         try:
-                            return json.loads(raw)
+                            return _loads_state(raw)
                         except json.JSONDecodeError as e:
                             logger.error(
                                 f"XHS __INITIAL_STATE__ brace JSON 解析失败: {e}"
@@ -377,35 +565,42 @@ class XiaohongshuParser:
 
     @staticmethod
     def _pick_stream_url(stream: dict) -> str:
-        # Combine h264 + h265 tracks, sort by quality (height desc)
-        tracks = []
-        for codec in ("h264", "h265", "av1", "h266"):
-            t = stream.get(codec, [])
-            if isinstance(t, list):
-                tracks.extend(t)
+        """从 stream 中选清晰度最高的轨道。
+
+        分组键随登录态变化：匿名按编码分（h264/h265/av1/h266），
+        登录态按清晰度等级分（EF4~EF7），故不按 key 枚举，改为遍历全部列表。
+        """
+        tracks = [
+            track
+            for value in stream.values()
+            if isinstance(value, list)
+            for track in value
+            if isinstance(track, dict)
+            and (track.get("masterUrl") or track.get("backupUrls"))
+        ]
         if not tracks:
             return ""
 
-        tracks.sort(
-            key=lambda t: t.get("height", 0) if isinstance(t, dict) else 0, reverse=True
-        )
+        def rank(track: dict) -> tuple:
+            height = track.get("height")
+            size = track.get("size")
+            return (
+                height if isinstance(height, (int, float)) else 0,
+                size if isinstance(size, (int, float)) else 0,
+            )
 
-        best = tracks[0] if isinstance(tracks[0], dict) else None
-        if not best:
-            return ""
+        best = max(tracks, key=rank)
 
         # Prefer backupUrls[0] over masterUrl
         burls = best.get("backupUrls")
-        if burls and isinstance(burls, list) and burls[0]:
+        if isinstance(burls, list) and burls and burls[0]:
             url = burls[0]
         else:
             url = best.get("masterUrl", "")
 
-        if url:
-            if url.startswith("//"):
-                url = "https:" + url
-            return url
-        return ""
+        if url and url.startswith("//"):
+            url = "https:" + url
+        return url or ""
 
     @staticmethod
     def _clean_webpic_path(path: str) -> str:

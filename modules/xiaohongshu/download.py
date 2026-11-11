@@ -51,9 +51,7 @@ class XiaohongshuDownloader:
 
         for i, item in enumerate(result.media_items):
             if len(ordered_media) >= self.max_images:
-                logger.debug(
-                    f"媒体数量达到上限 {self.max_images}，跳过后续媒体。"
-                )
+                logger.debug(f"媒体数量达到上限 {self.max_images}，跳过后续媒体。")
                 break
 
             candidate_urls: list[str] = item.get("urls") or []
