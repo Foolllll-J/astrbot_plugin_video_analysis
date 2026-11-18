@@ -26,6 +26,8 @@ from .strategies.web_api import WebApiStrategy
 from .strategies.share_page import SharePageStrategy
 from .strategies.third_party import ThirdPartyStrategy
 from .strategies.mobile_api import MobileApiStrategy, set_device_cache_dir
+from .strategies.anonymous_web import AnonymousWebStrategy
+from .identity import get_douyin_identity
 from .utils.cookie import extract_and_format_cookies
 
 
@@ -36,6 +38,8 @@ def init_douyin_login(data_dir: str) -> None:
     global _COOKIE_FILE_PATH
     _COOKIE_FILE_PATH = os.path.join(data_dir, "douyin_cookies.json")
     set_device_cache_dir(data_dir)
+    # 初始化长期持有的匿名身份运行时，避免每次解析重建
+    get_douyin_identity()
 
 
 async def _load_douyin_cookies_from_file() -> str | None:
@@ -83,6 +87,8 @@ class DouyinParser:
         self._strategies = []
         if cookie:
             self._strategies.append(WebApiStrategy())
+        # 匿名策略作为额外一层，失败后继续原有策略链
+        self._strategies.append(AnonymousWebStrategy())
         self._strategies += [
             MobileApiStrategy(),
             SharePageStrategy(),
@@ -191,19 +197,23 @@ async def send_douyin_with_title_forward(
     set_emoji_fn: Callable[[int, bool], Awaitable[None]] | None = None,
     text_sender_name: str = "抖音文案",
     media_sender_name: str = "抖音内容",
-):
-    """标题超长时，将标题文本与媒体组合为合并转发发送；非 aiocqhttp 降级为依次发送。"""
-    sender_id = event.get_self_id()
+) -> None:
+    """标题超长时组合转发；await 实际发送，支持重试。"""
+    from ..send_utils import (
+        deliver_items,
+        finish_delivery_report,
+        send_chain_with_retry,
+        send_plain,
+    )
 
+    sender_id = event.get_self_id()
     title_node = Node(uin=sender_id, name=text_sender_name, content=[Plain(title)])
 
-    ordered_media = result.get("ordered_media", [])
+    ordered_media = list(result.get("ordered_media", []) or [])
     if not ordered_media:
-        image_paths = result.get("image_paths", [])
-        video_paths = result.get("video_paths", [])
-        for p in image_paths:
+        for p in result.get("image_paths", []) or []:
             ordered_media.append({"path": p, "type": "image"})
-        for p in video_paths:
+        for p in result.get("video_paths", []) or []:
             ordered_media.append({"path": p, "type": "video"})
     if (
         not ordered_media
@@ -212,57 +222,92 @@ async def send_douyin_with_title_forward(
     ):
         ordered_media.append({"path": result["video_path"], "type": "video"})
 
-    if not ordered_media:
-        logger.error("标题转发：没有找到媒体文件")
-        yield event.plain_result(title)
+    async def _fail_notice(text: str) -> None:
+        await send_plain(event, text, attempts=1, delay=0, logger_obj=logger)
         if set_emoji_fn:
             await set_emoji_fn(424, False)
             await set_emoji_fn(357)
+
+    if not ordered_media:
+        logger.error("标题转发：没有找到媒体文件")
+        await _fail_notice(title)
         return
 
-    media_nodes = []
+    media_contents: list[list] = []
     for item in ordered_media:
         media_path = item["path"]
-        media_type = item["type"]
         if not os.path.exists(media_path):
             continue
         try:
-            if media_type == "image":
+            if item["type"] == "image":
                 component = Comp.Image.fromFileSystem(path=media_path)
             else:
                 component = Comp.Video.fromFileSystem(path=media_path)
-            media_nodes.append(
-                Node(uin=sender_id, name=media_sender_name, content=[component])
-            )
+            media_contents.append([component])
         except Exception as e:
             logger.error(f"标题转发处理媒体文件出错: {e}")
 
-    if not media_nodes:
+    if not media_contents:
         logger.error("标题转发：无法加载任何媒体文件")
-        yield event.plain_result(title)
-        if set_emoji_fn:
-            await set_emoji_fn(424, False)
-            await set_emoji_fn(357)
+        await _fail_notice(title)
         return
 
+    media_nodes = [
+        Node(uin=sender_id, name=media_sender_name, content=content)
+        for content in media_contents
+    ]
     all_nodes = [title_node] + media_nodes
 
     if event.get_platform_name() == "aiocqhttp":
-        try:
-            merged = Nodes(nodes=all_nodes)
-            yield event.chain_result([merged])
+        merged = Nodes(nodes=all_nodes)
+        ok = await send_chain_with_retry(
+            event,
+            [merged],
+            attempts=2,
+            delay=1,
+            label="标题转发",
+            logger_obj=logger,
+        )
+        if ok:
             logger.debug(f"标题转发成功：{len(media_nodes)} 个媒体（合并转发）")
-        except Exception as e:
-            logger.error(f"标题转发合并转发失败: {e}")
-            yield event.plain_result(title)
-            for node in media_nodes:
-                yield event.chain_result(node.content)
+            report = "ok"
+        else:
+            logger.warning("标题转发合并失败，降级为标题 + 逐项媒体发送")
+            await send_plain(event, title, attempts=1, delay=0, logger_obj=logger)
+            succeeded, _ = await deliver_items(
+                event,
+                media_contents,
+                attempts=2,
+                delay=1,
+                label="标题转发媒体",
+                logger_obj=logger,
+            )
+            report = await finish_delivery_report(
+                event,
+                succeeded=succeeded,
+                total=len(media_contents),
+                label="标题转发媒体",
+                logger_obj=logger,
+            )
     else:
         logger.debug("当前平台不支持合并转发，标题转发降级为依次发送")
-        yield event.plain_result(title)
-        for node in media_nodes:
-            yield event.chain_result(node.content)
+        await send_plain(event, title, attempts=1, delay=0, logger_obj=logger)
+        succeeded, _ = await deliver_items(
+            event,
+            media_contents,
+            attempts=2,
+            delay=1,
+            label="标题转发媒体",
+            logger_obj=logger,
+        )
+        report = await finish_delivery_report(
+            event,
+            succeeded=succeeded,
+            total=len(media_contents),
+            label="标题转发媒体",
+            logger_obj=logger,
+        )
 
     if set_emoji_fn:
         await set_emoji_fn(424, False)
-        await set_emoji_fn(124)
+        await set_emoji_fn(357 if report == "failed" else 124)

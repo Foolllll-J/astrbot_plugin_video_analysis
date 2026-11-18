@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 
@@ -6,6 +7,7 @@ import httpx
 from astrbot.api import logger
 
 from .constants import DOWNLOAD_HEADERS, IMAGE_EXTS, TIMEOUT
+from ..download_io import remove_quietly, replace_file, unique_temp_path
 
 
 class NgaDownloader:
@@ -25,18 +27,28 @@ class NgaDownloader:
         path = os.path.join(self.download_dir, name)
         if os.path.exists(path):
             return path
+        temp_path = unique_temp_path(path)
         try:
             async with httpx.AsyncClient(
                 proxy=self._proxy, timeout=TIMEOUT, follow_redirects=True
             ) as cli:
                 resp = await cli.get(url, headers=DOWNLOAD_HEADERS)
                 resp.raise_for_status()
-                with open(path, "wb") as f:
+                if not resp.content:
+                    return None
+                with open(temp_path, "wb") as f:
                     f.write(resp.content)
+            replace_file(temp_path, path)
+            temp_path = None
             return path
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"NGA 下载失败 {url}: {e}")
             return None
+        finally:
+            if temp_path:
+                remove_quietly(temp_path)
 
     async def download(self, parse_result) -> dict:
 

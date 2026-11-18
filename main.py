@@ -7,11 +7,25 @@ import astrbot.api.message_components as Comp
 
 import re
 import os
+import json
 import asyncio
 import time
 import httpx
-from typing import List
+from typing import Any, List, Optional
 from datetime import datetime
+
+from .modules.download_io import DownloadLimitExceeded, SizePrecheckExceeded
+from .modules.send_utils import (
+    deliver_items,
+    finish_delivery_report,
+    send_chain_with_retry,
+    send_plain,
+)
+from .modules.auto_delete import (
+    delete_old_files,
+    ensure_owned_dir,
+    get_file_use_guard,
+)
 
 from .modules.bilibili import (
     process_bili_video,
@@ -28,7 +42,9 @@ from .modules.bilibili import (
     probe_quality_plan,
     init_bili_module,
     bili_login,
-    check_cookie_valid,
+    check_cookie_valid_detailed,
+    cancel_bili_login_tasks,
+    LoginOutcome,
     UnsupportedBiliLinkError,
     _best_qn,
     _same_tier,
@@ -52,7 +68,6 @@ from .modules.nga import (
     NgaParser,
     NgaDownloader,
 )
-from .modules.auto_delete import delete_old_files
 from .modules.media_cache import (
     MediaCache,
     build_xhs_meta_text,
@@ -72,10 +87,12 @@ MAX_DOUYIN_PROCESS_RETRIES = 1
 MAX_SEND_RETRIES = 2
 
 
-async def async_delete_old_files(folder_path: str, time_threshold_minutes: int) -> int:
+async def async_delete_old_files(
+    folder_path: str, time_threshold_minutes: int, guard=None
+) -> list[str]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, delete_old_files, folder_path, time_threshold_minutes
+        None, delete_old_files, folder_path, time_threshold_minutes, guard
     )
 
 
@@ -176,11 +193,22 @@ class videoAnalysis(Star):
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_video_analysis")
         self.download_dir = os.path.join(self.data_dir, "downloads")
         os.makedirs(self.download_dir, exist_ok=True)
+        # 标记平台目录归属，供清理识别本插件文件
+        for _platform in ("bilibili", "douyin", "xhs", "tieba", "nga"):
+            ensure_owned_dir(os.path.join(self.download_dir, _platform))
+        self._file_guard = get_file_use_guard()
 
         # 初始化 bilibili 模块
         cookie_file = os.path.join(self.data_dir, "bili_cookies.json")
         init_bili_module(cookie_file)
         init_douyin_login(self.data_dir)
+
+    async def terminate(self) -> None:
+        """插件卸载时取消并回收登录任务。"""
+        try:
+            await cancel_bili_login_tasks()
+        except Exception as e:
+            logger.warning(f"取消 B站登录任务失败: {e}")
 
     def _build_parse_throttle_key(self, event: AstrMessageEvent):
         """限频作用域固定为群聊成员：group_id + sender_id"""
@@ -283,20 +311,13 @@ class videoAnalysis(Star):
 
     async def _process_and_send(
         self, event: AstrMessageEvent, result: dict, platform: str
-    ):
-        """
-        统一的消息发送逻辑，处理组件构建、重试、清理。
-        目标：如果视频过大，回复文本；否则，只发送视频组件。
-        """
-
+    ) -> None:
+        """统一发送逻辑：await 实际发送后再记录成功或重试。"""
         file_path_rel = result.get("video_path") if result else None
-        media_component = None
         message_to_send = None
 
-        # 0. 检查文件是否存在
         if not (file_path_rel and os.path.exists(file_path_rel)):
             error_msg = result.get("error") if result else None
-
             if error_msg:
                 logger.error(f"process_bili_video/douyin_video 失败: {error_msg}")
                 if not self.enable_emoji_reaction:
@@ -314,71 +335,50 @@ class videoAnalysis(Star):
                     message_to_send = [
                         Plain("抱歉，由于网络或解析问题，无法获取视频文件。")
                     ]
-
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
-            return
-        else:
-            file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
-            size_limit_bypassed = (
-                self.admin_bypass_content_restrictions and self._is_admin_event(event)
-            )
-
-            # 1. 判断是否超出大小限制
-            if not size_limit_bypassed and file_size_mb > self.max_video_size:
-                logger.warning(
-                    f"视频大小超出限制。文件: {file_path_rel}，大小: {file_size_mb:.2f}MB，最大限制: {self.max_video_size}MB。"
+            if message_to_send:
+                await send_chain_with_retry(
+                    event,
+                    message_to_send,
+                    attempts=1,
+                    delay=0,
+                    label="错误提示",
+                    logger_obj=logger,
                 )
-                result["error"] = "video_size_exceeded"
-                result["file_size_mb"] = file_size_mb
-                if not self.enable_emoji_reaction:
-                    message_to_send = [
-                        Plain(
-                            f"抱歉，视频大小 {file_size_mb:.2f}MB 超出限制 {self.max_video_size}MB，无法发送。"
-                        )
-                    ]
-            else:
-                if size_limit_bypassed:
-                    logger.debug(
-                        f"下载完成：文件大小={file_size_mb:.2f}MB，已由管理员跳过 {self.max_video_size}MB 限制。"
+            return
+
+        file_size_mb = os.path.getsize(file_path_rel) / (1024 * 1024)
+        size_limit_bypassed = (
+            self.admin_bypass_content_restrictions and self._is_admin_event(event)
+        )
+        if not size_limit_bypassed and file_size_mb > self.max_video_size:
+            logger.warning(
+                f"视频大小超出限制。文件: {file_path_rel}，大小: {file_size_mb:.2f}MB，最大限制: {self.max_video_size}MB。"
+            )
+            result["error"] = "video_size_exceeded"
+            result["file_size_mb"] = file_size_mb
+            if not self.enable_emoji_reaction:
+                message_to_send = [
+                    Plain(
+                        f"抱歉，视频大小 {file_size_mb:.2f}MB 超出限制 {self.max_video_size}MB，无法发送。"
                     )
-                else:
-                    logger.debug(
-                        f"下载完成：文件大小={file_size_mb:.2f}MB，限制={self.max_video_size}MB，大小校验通过。"
-                    )
-                # 视频在限制内，构建视频组件
-                nap_file_path = await self._send_file_if_needed(file_path_rel)
-
-                media_component = Comp.Video.fromFileSystem(path=nap_file_path)
-                message_to_send = [media_component]
-                await self._set_emoji(event, 424, False)
-                await self._set_emoji(event, 124)
-
-        # 2. 发送逻辑
-        if message_to_send:
-            for send_attempt in range(MAX_SEND_RETRIES + 1):
-                try:
-                    yield event.chain_result(message_to_send)
-                    logger.info(f"消息发送成功 (总尝试次数: {send_attempt + 1})。")
-                    break
-
-                except Exception as e:
-                    if send_attempt < MAX_SEND_RETRIES:
-                        logger.warning(
-                            f"消息发送失败 (第 {send_attempt + 1} 次)，等待 2 秒后重试... 错误: {e}"
-                        )
-                        await asyncio.sleep(2)
-                    else:
-                        logger.error(
-                            f"消息发送最终失败 ({MAX_SEND_RETRIES + 1} 次重试)。错误: {e}",
-                            exc_info=True,
-                        )
-                        if not self.enable_emoji_reaction:
-                            yield event.plain_result("警告：消息发送失败，请稍后重试。")
-                        await self._set_emoji(event, 424, False)
-                        await self._set_emoji(event, 357)
-                        return
+                ]
         else:
+            if size_limit_bypassed:
+                logger.debug(
+                    f"下载完成：文件大小={file_size_mb:.2f}MB，已由管理员跳过 {self.max_video_size}MB 限制。"
+                )
+            else:
+                logger.debug(
+                    f"下载完成：文件大小={file_size_mb:.2f}MB，限制={self.max_video_size}MB，大小校验通过。"
+                )
+            nap_file_path = await self._send_file_if_needed(file_path_rel)
+            message_to_send = [Comp.Video.fromFileSystem(path=nap_file_path)]
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 124)
+
+        if not message_to_send:
             emoji_id = 357
             if result and result.get("error") == "video_size_exceeded":
                 emoji_id = 325
@@ -388,11 +388,36 @@ class videoAnalysis(Star):
             await self._set_emoji(event, emoji_id)
             return
 
-        return
+        ok = await send_chain_with_retry(
+            event,
+            message_to_send,
+            attempts=MAX_SEND_RETRIES + 1,
+            delay=2,
+            label="消息",
+            logger_obj=logger,
+        )
+        if ok:
+            return
+        if not self.enable_emoji_reaction:
+            await send_plain(
+                event,
+                "警告：消息发送失败，请稍后重试。",
+                attempts=1,
+                delay=0,
+                label="发送失败提示",
+                logger_obj=logger,
+            )
+        await self._set_emoji(event, 424, False)
+        await self._set_emoji(event, 357)
 
-    async def _cleanup_media(self, download_dir: str):
-        """清理过期媒体文件，并联动清理失效的本地缓存条目。"""
-        await async_delete_old_files(download_dir, self.delete_time)
+    async def _cleanup_media(self, download_dir: str) -> None:
+        """只清理本插件拥有且未被使用的过期文件，并联动清理缓存条目。"""
+        ensure_owned_dir(download_dir)
+        deleted = await async_delete_old_files(
+            download_dir, self.delete_time, self._file_guard
+        )
+        if deleted:
+            await self.media_cache.remove_paths(deleted)
         await self.media_cache.cleanup(self.delete_time * 60)
 
     async def _handle_bili_parsing(self, event: AstrMessageEvent, url: str):
@@ -415,16 +440,23 @@ class videoAnalysis(Star):
         # 缓存直发：本地已解析过的内容直接发送，免解析免下载
         status, cached_entry = await lookup_cached_media(self, event, url, "bilibili")
         if status == "hit":
-            async for response in send_cached_result(
-                self, event, cached_entry, "bilibili"
-            ):
-                yield response
+            await send_cached_result(self, event, cached_entry, "bilibili")
             return
         if status == "blocked":
             return
 
         # 清晰度降级映射：当前质量 -> 下一档质量
         DOWNGRADE_MAP = {120: 112, 112: 80, 80: 64, 64: 32, 32: 16, 16: 16}
+
+        def downgrade_target(qn: int):
+            """沿用现有选档语义：优先真实档位降序，其次固定映射。"""
+            if real_qualities_desc and qn in real_qualities_desc:
+                idx = real_qualities_desc.index(qn)
+                for cand in real_qualities_desc[idx + 1 :]:
+                    if not _same_tier(cand, qn):
+                        return cand
+                return None
+            return DOWNGRADE_MAP.get(qn)
 
         initial_quality = self.bili_quality
         max_size = self.max_video_size
@@ -552,6 +584,7 @@ class videoAnalysis(Star):
             return
 
         current_quality = target_quality
+        bili_dir = os.path.join(self.download_dir, "bilibili")
 
         # 步骤 3：下载 + 后置体积校验循环
         while True:
@@ -567,18 +600,41 @@ class videoAnalysis(Star):
             download_attempts += 1
             logger.debug(f"下载尝试 #{download_attempts}：qn={current_quality}。")
 
+            over_limit_before_file = False
+            over_limit_reason = ""
             try:
-                result = await process_bili_video(
-                    url,
-                    download_flag=videos_download,
-                    quality=current_quality,
-                    use_login=use_login,
-                    event=None,
-                    download_dir=os.path.join(self.download_dir, "bilibili"),
-                )
+                with self._file_guard.download_dir(bili_dir):
+                    result = await process_bili_video(
+                        url,
+                        download_flag=videos_download,
+                        quality=current_quality,
+                        use_login=use_login,
+                        event=None,
+                        download_dir=bili_dir,
+                        max_size_mb=max_size,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except (SizePrecheckExceeded, DownloadLimitExceeded) as e:
+                # 下载前/过程超限：无半成品，直接进降档流程
+                over_limit_before_file = True
+                over_limit_reason = str(e)
+                result = None
+                logger.warning(f"B站 qn{current_quality} 体积超限: {e}")
             except Exception as e:
                 logger.warning(f"下载失败: {e}")
                 result = {"error": f"下载失败: {e}"}
+                break
+
+            if over_limit_before_file:
+                next_quality = downgrade_target(current_quality)
+                if next_quality is not None and next_quality != current_quality:
+                    logger.debug(
+                        f"体积预检/过程限额：qn{current_quality} 超限，降级到 qn{next_quality}。"
+                    )
+                    current_quality = next_quality
+                    continue
+                result = {"error": f"视频大小超出限制：{over_limit_reason}"}
                 break
 
             file_path_rel = result.get("video_path") if result else None
@@ -591,15 +647,7 @@ class videoAnalysis(Star):
                 break
 
             # 文件超限：若可降级则继续尝试下一档清晰度
-            if real_qualities_desc and current_quality in real_qualities_desc:
-                idx = real_qualities_desc.index(current_quality)
-                next_quality = None
-                for q in real_qualities_desc[idx + 1 :]:
-                    if not _same_tier(q, current_quality):
-                        next_quality = q
-                        break
-            else:
-                next_quality = DOWNGRADE_MAP.get(current_quality)
+            next_quality = downgrade_target(current_quality)
             can_downgrade = next_quality is not None and next_quality != current_quality
             if can_downgrade:
                 logger.debug(
@@ -637,9 +685,8 @@ class videoAnalysis(Star):
                 )
             except Exception as e:
                 logger.debug(f"写入 B站缓存失败: {e}")
-        async for response in self._process_and_send(event, result, "bili"):
-            yield response
-        await self._cleanup_media(os.path.join(self.download_dir, "bilibili"))
+        await self._process_and_send(event, result, "bili")
+        await self._cleanup_media(bili_dir)
 
     async def _handle_douyin_parsing(self, event: AstrMessageEvent, url: str):
         """
@@ -661,10 +708,7 @@ class videoAnalysis(Star):
         # 缓存直发：本地已解析过的内容直接发送，免解析免下载
         status, cached_entry = await lookup_cached_media(self, event, url, "douyin")
         if status == "hit":
-            async for response in send_cached_result(
-                self, event, cached_entry, "douyin"
-            ):
-                yield response
+            await send_cached_result(self, event, cached_entry, "douyin")
             return
         if status == "blocked":
             return
@@ -728,7 +772,8 @@ class videoAnalysis(Star):
                     f"尝试下载 (URL: {url}, 尝试次数: {attempt + 1}/{MAX_DOUYIN_PROCESS_RETRIES + 1})"
                 )
 
-                result = await downloader.download(parse_result, url)
+                with self._file_guard.download_dir(download_dir):
+                    result = await downloader.download(parse_result, url)
 
                 if result.get("error"):
                     if attempt < MAX_DOUYIN_PROCESS_RETRIES:
@@ -804,28 +849,25 @@ class videoAnalysis(Star):
             self.text_forward_threshold > 0
             and visible_len(meta_title) > self.text_forward_threshold
         ):
-            async for response in forward_long_text(
+            await forward_long_text(
                 event,
                 meta_title,
                 result,
                 set_emoji_fn=lambda emoji_id, set_val=True: self._set_emoji(
                     event, emoji_id, set_val
                 ),
-            ):
-                yield response
+            )
             return
 
         # 处理多媒体类型
         result_type = result.get("type", "")
         if result_type in ["image", "images", "multi_video"]:
-            async for response in self._send_douyin_multimedia(event, result):
-                yield response
+            await self._send_douyin_multimedia(event, result)
             return
 
         # 处理单视频类型
         elif result.get("video_path") and os.path.exists(result["video_path"]):
-            async for response in self._process_and_send(event, result, "douyin"):
-                yield response
+            await self._process_and_send(event, result, "douyin")
 
         # 处理失败情况
         else:
@@ -847,8 +889,7 @@ class videoAnalysis(Star):
         # 缓存直发：本地已解析过的内容直接发送，免解析免下载
         status, cached_entry = await lookup_cached_media(self, event, url, "xhs")
         if status == "hit":
-            async for response in send_cached_result(self, event, cached_entry, "xhs"):
-                yield response
+            await send_cached_result(self, event, cached_entry, "xhs")
             return
         if status == "blocked":
             return
@@ -885,7 +926,8 @@ class videoAnalysis(Star):
             download_dir=download_dir,
             max_images=self.media_max_images,
         )
-        result = await downloader.download(parse_result, url)
+        with self._file_guard.download_dir(download_dir):
+            result = await downloader.download(parse_result, url)
 
         if result.get("error"):
             logger.warning(f"NGA 下载失败: {result['error']}")
@@ -926,7 +968,7 @@ class videoAnalysis(Star):
             self.text_forward_threshold > 0
             and visible_len(meta_text) > self.text_forward_threshold
         ):
-            async for response in forward_long_text(
+            await forward_long_text(
                 event,
                 meta_text,
                 result,
@@ -935,21 +977,16 @@ class videoAnalysis(Star):
                 ),
                 text_sender_name="小红书正文",
                 media_sender_name="小红书内容",
-            ):
-                yield response
+            )
             await self._cleanup_media(download_dir)
             return
 
         # 单视频走已有发送逻辑
         if result.get("type") == "video":
-            async for response in self._process_and_send(event, result, "xhs"):
-                yield response
+            await self._process_and_send(event, result, "xhs")
         else:
             # 多媒体（多图 / 图文混合）复用多媒体发送
-            async for response in self._send_douyin_multimedia(
-                event, result, "小红书内容"
-            ):
-                yield response
+            await self._send_douyin_multimedia(event, result, "小红书内容")
 
         await self._cleanup_media(download_dir)
 
@@ -994,7 +1031,8 @@ class videoAnalysis(Star):
             download_dir=download_dir,
             max_images=self.media_max_images,
         )
-        result = await downloader.download(parse_result, url)
+        with self._file_guard.download_dir(download_dir):
+            result = await downloader.download(parse_result, url)
 
         if result.get("error"):
             logger.warning(f"小红书下载失败: {result['error']}")
@@ -1096,21 +1134,55 @@ class videoAnalysis(Star):
             return
 
         if event.get_platform_name() == "aiocqhttp":
-            try:
-                merged = Nodes(nodes=nodes)
-                yield event.chain_result([merged])
+            merged = Nodes(nodes=nodes)
+            ok = await send_chain_with_retry(
+                event,
+                [merged],
+                attempts=2,
+                delay=1,
+                label="贴吧合并转发",
+                logger_obj=logger,
+            )
+            if ok:
                 logger.debug(f"贴吧合并转发成功：{len(nodes)} 个节点")
-            except Exception as e:
-                logger.warning(f"贴吧合并转发失败: {e}")
-                for node in nodes:
-                    yield event.chain_result(node.content)
+                report = "ok"
+            else:
+                logger.warning("贴吧合并转发失败，降级为逐节点发送")
+                succeeded, _ = await deliver_items(
+                    event,
+                    [node.content for node in nodes],
+                    attempts=2,
+                    delay=1,
+                    label="贴吧内容",
+                    logger_obj=logger,
+                )
+                report = await finish_delivery_report(
+                    event,
+                    succeeded=succeeded,
+                    total=len(nodes),
+                    label="贴吧内容",
+                    logger_obj=logger,
+                )
         else:
             logger.debug("当前平台不支持合并转发，贴吧降级为依次发送")
-            for node in nodes:
-                yield event.chain_result(node.content)
+            succeeded, _ = await deliver_items(
+                event,
+                [node.content for node in nodes],
+                attempts=2,
+                delay=1,
+                label="贴吧内容",
+                logger_obj=logger,
+            )
+            report = await finish_delivery_report(
+                event,
+                succeeded=succeeded,
+                total=len(nodes),
+                label="贴吧内容",
+                logger_obj=logger,
+            )
 
         await self._set_emoji(event, 424, False)
-        await self._set_emoji(event, 124)
+        await self._set_emoji(event, 357 if report == "failed" else 124)
         await self._cleanup_media(download_dir)
 
     async def _handle_nga_parsing(self, event: AstrMessageEvent, url: str):
@@ -1149,7 +1221,8 @@ class videoAnalysis(Star):
         downloader = NgaDownloader(
             download_dir=download_dir, max_images=self.media_max_images
         )
-        result = await downloader.download(parse_result)
+        with self._file_guard.download_dir(download_dir):
+            result = await downloader.download(parse_result)
         if result.get("error"):
             logger.warning(f"贴吧下载失败: {result['error']}")
             if not self.enable_emoji_reaction:
@@ -1231,159 +1304,221 @@ class videoAnalysis(Star):
             logger.warning("NGA：没有构建出任何消息节点")
 
         if event.get_platform_name() == "aiocqhttp":
-            try:
-                merged = Nodes(nodes=nodes)
-                yield event.chain_result([merged])
-            except Exception as e:
-                logger.warning(f"NGA 合并转发失败: {e}")
-                for node in nodes:
-                    yield event.chain_result(node.content)
+            merged = Nodes(nodes=nodes)
+            ok = await send_chain_with_retry(
+                event,
+                [merged],
+                attempts=2,
+                delay=1,
+                label="NGA 合并转发",
+                logger_obj=logger,
+            )
+            if ok:
+                report = "ok"
+            else:
+                logger.warning("NGA 合并转发失败，降级为逐节点发送")
+                succeeded, _ = await deliver_items(
+                    event,
+                    [node.content for node in nodes],
+                    attempts=2,
+                    delay=1,
+                    label="NGA内容",
+                    logger_obj=logger,
+                )
+                report = await finish_delivery_report(
+                    event,
+                    succeeded=succeeded,
+                    total=len(nodes),
+                    label="NGA内容",
+                    logger_obj=logger,
+                )
         else:
             logger.debug("当前平台不支持合并转发，NGA 降级为依次发送")
-            for node in nodes:
-                yield event.chain_result(node.content)
+            succeeded, _ = await deliver_items(
+                event,
+                [node.content for node in nodes],
+                attempts=2,
+                delay=1,
+                label="NGA内容",
+                logger_obj=logger,
+            )
+            report = await finish_delivery_report(
+                event,
+                succeeded=succeeded,
+                total=len(nodes),
+                label="NGA内容",
+                logger_obj=logger,
+            )
 
         await self._set_emoji(event, 424, False)
-        await self._set_emoji(event, 124)
+        await self._set_emoji(event, 357 if report == "failed" else 124)
         await self._cleanup_media(download_dir)
 
     async def _send_douyin_multimedia(
         self, event: AstrMessageEvent, result: dict, sender_name: str = "抖音内容"
-    ):
-        """发送抖音多媒体（单个直接发送，多个使用合并转发，保持原始顺序）"""
-        ordered_media = result.get("ordered_media", [])
+    ) -> None:
+        """发送抖音多媒体：部分失败继续发送剩余项，只重试失败项。"""
+        ordered_media = list(result.get("ordered_media", []) or [])
 
         # 兼容旧版本或 API 返回的格式
         if not ordered_media:
-            image_paths = result.get("image_paths", [])
-            video_paths = result.get("video_paths", [])
-            for p in image_paths:
+            for p in result.get("image_paths", []) or []:
                 ordered_media.append({"path": p, "type": "image"})
-            for p in video_paths:
+            for p in result.get("video_paths", []) or []:
                 ordered_media.append({"path": p, "type": "video"})
+
+        async def content_for(item):
+            path = await self._send_file_if_needed(item["path"])
+            if item["type"] == "image":
+                return [Image.fromFileSystem(path=path)]
+            return [Comp.Video.fromFileSystem(path=path)]
 
         if not ordered_media:
             logger.warning("没有找到媒体文件")
             if not self.enable_emoji_reaction:
-                yield event.plain_result("抱歉，没有找到媒体文件。")
+                await send_plain(
+                    event,
+                    "抱歉，没有找到媒体文件。",
+                    attempts=1,
+                    delay=0,
+                    logger_obj=logger,
+                )
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
 
         if len(ordered_media) == 1:
             item = ordered_media[0]
-            media_path = item["path"]
-            if not os.path.exists(media_path):
-                logger.warning(f"媒体文件不存在: {media_path}")
+            if not os.path.exists(item["path"]):
+                logger.warning(f"媒体文件不存在: {item['path']}")
                 if not self.enable_emoji_reaction:
-                    yield event.plain_result("抱歉，媒体文件不存在。")
+                    await send_plain(
+                        event,
+                        "抱歉，媒体文件不存在。",
+                        attempts=1,
+                        delay=0,
+                        logger_obj=logger,
+                    )
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 357)
                 return
-
             try:
-                nap_file_path = await self._send_file_if_needed(media_path)
-                if item["type"] == "image":
-                    yield event.chain_result([Image.fromFileSystem(path=nap_file_path)])
-                else:
-                    yield event.chain_result(
-                        [Comp.Video.fromFileSystem(path=nap_file_path)]
-                    )
-                logger.debug(f"成功直接发送单个媒体文件: {media_path}")
+                content = await content_for(item)
+            except Exception as e:
+                logger.warning(f"构建单个媒体组件失败: {e}")
+                await self._set_emoji(event, 424, False)
+                await self._set_emoji(event, 357)
+                return
+            ok = await send_chain_with_retry(
+                event,
+                content,
+                attempts=MAX_SEND_RETRIES + 1,
+                delay=2,
+                label="单个媒体",
+                logger_obj=logger,
+            )
+            if ok:
+                logger.debug(f"成功直接发送单个媒体文件: {item['path']}")
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 124)
-                return
-            except Exception as e:
-                logger.warning(f"直接发送单个媒体失败: {e}")
+            else:
                 if not self.enable_emoji_reaction:
-                    yield event.plain_result(f"发送失败: {str(e)}")
+                    await send_plain(
+                        event,
+                        "发送失败，请稍后重试。",
+                        attempts=1,
+                        delay=0,
+                        logger_obj=logger,
+                    )
                 await self._set_emoji(event, 424, False)
                 await self._set_emoji(event, 357)
-                return
-
-        # --- 多个媒体使用合并转发 ---
-        if event.get_platform_name() != "aiocqhttp":
-            logger.debug("当前平台不支持合并转发，已降级为逐条发送抖音多媒体。")
-
-            success_count = 0
-            for idx, item in enumerate(ordered_media, 1):
-                media_path = item["path"]
-                media_type = item["type"]
-
-                if not os.path.exists(media_path):
-                    logger.warning(f"文件不存在: {media_path}")
-                    continue
-
-                try:
-                    nap_file_path = await self._send_file_if_needed(media_path)
-                    if media_type == "image":
-                        component = Image.fromFileSystem(path=nap_file_path)
-                    else:
-                        component = Comp.Video.fromFileSystem(path=nap_file_path)
-                    yield event.chain_result([component])
-                    success_count += 1
-                except Exception as e:
-                    logger.warning(f"降级发送第 {idx} 个媒体 ({media_type}) 失败: {e}")
-
-            if success_count == 0:
-                logger.warning("降级逐条发送全部失败")
-                if not self.enable_emoji_reaction:
-                    yield event.plain_result("抱歉，当前平台暂不支持该多媒体发送方式。")
-                await self._set_emoji(event, 424, False)
-                await self._set_emoji(event, 357)
-                return
-
-            await self._set_emoji(event, 424, False)
-            await self._set_emoji(event, 124)
             return
 
-        logger.debug(f"准备发送 {len(ordered_media)} 个媒体文件（保持顺序，合并转发）")
-
-        sender_id = event.get_self_id()
-        forward_nodes = []
-
+        contents: list[list] = []
         for idx, item in enumerate(ordered_media, 1):
-            media_path = item["path"]
-            media_type = item["type"]
-
-            if not os.path.exists(media_path):
-                logger.warning(f"文件不存在: {media_path}")
+            if not os.path.exists(item["path"]):
+                logger.warning(f"文件不存在: {item['path']}")
                 continue
-
             try:
-                nap_file_path = await self._send_file_if_needed(media_path)
-                if media_type == "image":
-                    component = Image.fromFileSystem(path=nap_file_path)
-                else:
-                    component = Comp.Video.fromFileSystem(path=nap_file_path)
-
-                forward_nodes.append(
-                    Node(uin=sender_id, name=sender_name, content=[component])
-                )
+                contents.append(await content_for(item))
             except Exception as e:
-                logger.warning(f"处理第 {idx} 个媒体 ({media_type}) 时出错: {e}")
+                logger.warning(f"处理第 {idx} 个媒体时出错: {e}")
 
-        if len(forward_nodes) == 0:
-            logger.warning("无法加载媒体文件（合并转发构建为空）")
+        if not contents:
+            logger.warning("无法加载媒体文件")
             if not self.enable_emoji_reaction:
-                yield event.plain_result("抱歉，无法加载媒体文件。")
+                await send_plain(
+                    event,
+                    "抱歉，无法加载媒体文件。",
+                    attempts=1,
+                    delay=0,
+                    logger_obj=logger,
+                )
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 357)
             return
 
-        # 发送合并转发消息
-        try:
-            merged_forward_message = Nodes(nodes=forward_nodes)
-            yield event.chain_result([merged_forward_message])
+        if event.get_platform_name() != "aiocqhttp":
+            logger.debug("当前平台不支持合并转发，已降级为逐条发送抖音多媒体。")
+            succeeded, _ = await deliver_items(
+                event,
+                contents,
+                attempts=MAX_SEND_RETRIES + 1,
+                delay=2,
+                label="图集",
+                logger_obj=logger,
+            )
+            report = await finish_delivery_report(
+                event,
+                succeeded=succeeded,
+                total=len(contents),
+                label="图集",
+                logger_obj=logger,
+            )
+            await self._set_emoji(event, 424, False)
+            await self._set_emoji(event, 357 if report == "failed" else 124)
+            return
+
+        logger.debug(f"准备发送 {len(contents)} 个媒体文件（保持顺序，合并转发）")
+        sender_id = event.get_self_id()
+        forward_nodes = [
+            Node(uin=sender_id, name=sender_name, content=content)
+            for content in contents
+        ]
+        merged = Nodes(nodes=forward_nodes)
+        ok = await send_chain_with_retry(
+            event,
+            [merged],
+            attempts=2,
+            delay=1,
+            label="图集合并转发",
+            logger_obj=logger,
+        )
+        if ok:
             logger.debug(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
             await self._set_emoji(event, 424, False)
             await self._set_emoji(event, 124)
-        except Exception as e:
-            logger.error(f"发送合并转发消息失败: {e}", exc_info=True)
-            if not self.enable_emoji_reaction:
-                yield event.plain_result(f"内容发送失败: {str(e)}")
-            await self._set_emoji(event, 424, False)
-            await self._set_emoji(event, 357)
+            return
+
+        # 合并转发失败：逐项发送，避免整组丢失；只重试失败项
+        logger.warning("图集合并转发失败，降级为逐项发送")
+        succeeded, _ = await deliver_items(
+            event,
+            contents,
+            attempts=2,
+            delay=1,
+            label="图集",
+            logger_obj=logger,
+        )
+        report = await finish_delivery_report(
+            event,
+            succeeded=succeeded,
+            total=len(contents),
+            label="图集",
+            logger_obj=logger,
+        )
+        await self._set_emoji(event, 424, False)
+        await self._set_emoji(event, 357 if report == "failed" else 124)
 
     @filter.command("bili_login")
     async def handle_bili_login(self, event: AstrMessageEvent):
@@ -1392,54 +1527,61 @@ class videoAnalysis(Star):
         """
         logger.info("收到 B站登录指令")
 
-        # 生成二维码
+        # bili_login 会取消旧流程，同一时刻仅一个登录任务
         login_task, qr_data = await bili_login()
 
-        if not qr_data:
-            yield event.plain_result("生成登录二维码失败，请稍后重试。")
+        if not qr_data or login_task is None:
+            await send_plain(
+                event,
+                "生成登录二维码失败，请稍后重试。",
+                attempts=1,
+                delay=0,
+                logger_obj=logger,
+            )
             return
 
-        temp_image_path = None
-        # 发送二维码图片给用户
         try:
-            # 将 base64 二维码转换为图片组件
-            import base64
-
-            qr_image_data = base64.b64decode(qr_data["image_base64"])
-
-            # 保存临时文件
-            temp_image_path = os.path.join(self.data_dir, "bili_login_qrcode.png")
-            with open(temp_image_path, "wb") as f:
-                f.write(qr_image_data)
-
-            # 发送图片和提示信息
-            yield event.chain_result(
+            # 二维码改用内存图片
+            qr_component = Image.fromBytes(qr_data["image_bytes"])
+            await send_chain_with_retry(
+                event,
                 [
                     Plain("请使用 B站APP 扫描以下二维码登录：\n"),
-                    Image.fromFileSystem(temp_image_path),
+                    qr_component,
                     Plain("\n等待登录中...（最多150秒）"),
-                ]
+                ],
+                attempts=2,
+                delay=1,
+                label="登录二维码",
+                logger_obj=logger,
             )
 
-            # 等待登录完成
-            cookies = await login_task
-
-            if cookies:
-                yield event.plain_result("✅ B站登录成功！Cookie 已保存。")
+            outcome: LoginOutcome = await login_task
+            if outcome.saved:
+                message = "✅ B站登录成功！Cookie 已保存。"
+            elif outcome.cookies:
+                message = (
+                    "❌ 登录已成功，但 Cookie 保存失败，"
+                    "请检查数据目录权限后重试 /bili_login。"
+                )
             else:
-                yield event.plain_result("❌ 登录失败或超时，请重试。")
-
+                message = "❌ 登录失败或超时，请重试。"
+            await send_plain(event, message, attempts=1, delay=0, logger_obj=logger)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"处理登录流程时出错: {e}", exc_info=True)
-            yield event.plain_result("登录过程中出现错误，请查看日志。")
+            await send_plain(
+                event,
+                "登录过程中出现错误，请查看日志。",
+                attempts=1,
+                delay=0,
+                logger_obj=logger,
+            )
         finally:
-            # 安全删除临时二维码文件
-            if temp_image_path and os.path.exists(temp_image_path):
-                try:
-                    os.remove(temp_image_path)
-                    logger.debug(f"已删除临时二维码文件: {temp_image_path}")
-                except Exception as e:
-                    logger.warning(f"删除临时二维码文件失败: {e}")
+            if not login_task.done():
+                login_task.cancel()
+                await asyncio.gather(login_task, return_exceptions=True)
 
     @filter.command("bili_check")
     async def handle_bili_check(self, event: AstrMessageEvent):
@@ -1448,14 +1590,163 @@ class videoAnalysis(Star):
         """
         logger.info("收到检查 Cookie 指令")
 
-        is_valid = await check_cookie_valid()
+        is_valid = await check_cookie_valid_detailed()
 
-        if is_valid:
+        if is_valid is True:
             yield event.plain_result("✅ B站 Cookie 有效")
-        else:
+        elif is_valid is False:
             yield event.plain_result(
                 "❌ B站 Cookie 无效或不存在，请使用 /bili_login 登录"
             )
+        else:
+            yield event.plain_result(
+                "⚠️ Cookie 校验遇到临时网络失败，未能确认凭据状态，请稍后重试 /bili_check"
+            )
+
+
+# ---------------------------------------------------------------------------
+# QQ 结构化卡片链接提取与引用判断（仅本 dispatcher 使用）：
+# 只读结构化字段，不扫调试字符串；卡片 URL 原样保留。
+# ---------------------------------------------------------------------------
+
+# QQ 分享卡片常见结构：meta.detail_1.qqdocurl / meta.news.jumpUrl
+_NESTED_URL_PATHS = (
+    ("meta", "detail_1", "qqdocurl"),
+    ("meta", "news", "jumpUrl"),
+    ("meta", "news", "url"),
+)
+_FLAT_URL_KEYS = ("qqdocurl", "jumpUrl", "url")
+
+
+def _coerce_mapping(value: Any) -> Optional[dict]:
+    """把 dict 或 JSON 字符串归一为 dict；损坏数据返回 None。"""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or not text.startswith("{"):
+            return None
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _dig(mapping: dict, path: tuple) -> Any:
+    current: Any = mapping
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+        if isinstance(current, str) and key in ("meta", "detail_1", "news"):
+            current = _coerce_mapping(current)
+    return current
+
+
+def _valid_url(value: Any) -> Optional[str]:
+    """校验提取结果是可直接交给平台匹配的普通字符串 URL。"""
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    low = url.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        return None
+    if any(ch.isspace() for ch in url) or "\x00" in url:
+        return None
+    return url
+
+
+def extract_card_urls_from_data(msg_data: Any) -> list[str]:
+    """从单个消息段的 data 字段提取卡片 URL（字典或 JSON 字符串）。"""
+    if msg_data is None:
+        return []
+
+    candidates: list[Any] = []
+    if isinstance(msg_data, dict):
+        candidates.append(msg_data)
+        nested = msg_data.get("data")
+        if isinstance(nested, (dict, str)):
+            candidates.append(nested)
+    elif isinstance(msg_data, str):
+        candidates.append(msg_data)
+    else:
+        return []
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        mapping = _coerce_mapping(candidate)
+        if not mapping:
+            continue
+        found: list[Optional[str]] = [
+            _valid_url(_dig(mapping, path)) for path in _NESTED_URL_PATHS
+        ]
+        found.extend(_valid_url(mapping.get(key)) for key in _FLAT_URL_KEYS)
+        for url in found:
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def _reply_class():
+    try:
+        from astrbot.api.message_components import Reply
+
+        return Reply
+    except Exception:
+        return None
+
+
+def is_reply_component(comp: Any) -> bool:
+    """用真实 Reply 组件判断引用，不做字符串包含匹配。"""
+    reply_cls = _reply_class()
+    if reply_cls is not None and isinstance(comp, reply_cls):
+        return True
+    comp_type = getattr(comp, "type", None)
+    type_value = getattr(comp_type, "value", comp_type)
+    if isinstance(type_value, str) and type_value.lower() == "reply":
+        return True
+    return type(comp).__name__ == "Reply" and hasattr(comp, "id")
+
+
+def get_current_components(event) -> list:
+    try:
+        messages = event.get_messages()
+    except Exception:
+        return []
+    return list(messages) if isinstance(messages, (list, tuple)) else []
+
+
+def has_reply_component(event) -> bool:
+    """消息是否带引用（沿用插件原有「跳过引用消息」行为）。"""
+    return any(is_reply_component(comp) for comp in get_current_components(event))
+
+
+def extract_current_message_urls(event) -> list[str]:
+    """只从当前消息的结构化组件提取卡片链接；跳过 Reply 及其内嵌消息链。"""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for comp in get_current_components(event):
+        if is_reply_component(comp):
+            continue
+        data = getattr(comp, "data", None)
+        if data is None:
+            continue
+        try:
+            extracted = extract_card_urls_from_data(data)
+        except Exception:
+            # 单个损坏组件不影响正文解析
+            continue
+        for url in extracted:
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
 
 
 @filter.event_message_type(EventMessageType.ALL)
@@ -1472,11 +1763,14 @@ async def auto_parse_dispatcher(
     if not _enabled_platforms:
         return
 
-    message_str = event.message_str
-    message_obj_str = str(event.message_obj)
-
-    if re.search(r"reply", message_obj_str):
+    # 用真实 Reply 组件判断引用，沿用「跳过引用消息」行为
+    if has_reply_component(event):
         return
+
+    message_str = event.message_str or ""
+    # 平台匹配源 = 正文 + 结构化卡片链接；卡片 URL 原样保留
+    card_urls = extract_current_message_urls(event)
+    match_text = "\n".join([message_str, *card_urls]) if card_urls else message_str
 
     # 解析限制白名单检查
     _throttle_whitelisted = False
@@ -1495,27 +1789,14 @@ async def auto_parse_dispatcher(
             r"https?://bili2233\.cn/[\w]+|"
             r"(?<![A-Za-z0-9])(?:BV1\w{9}|av\d+)(?![A-Za-z0-9])|"
             r"https?://(?:live|t|space|www|m)\.bilibili\.com/[\w/]+)",
-            message_str,
+            match_text,
         )
-        match_bili_json = re.search(
-            r"https?://(?:b23\.tv|bili2233\.cn)/[a-zA-Z0-9]+", message_obj_str
-        )
-        if not match_bili_json:
-            match_bili_json = re.search(
-                r"https:\\\\/\\\\/(?:b23\.tv|bili2233\.cn)\\\\/[a-zA-Z0-9]+",
-                message_obj_str,
-            )
-
-        if match_bili or match_bili_json:
-            if match_bili:
-                url = match_bili.group(1)
-            else:
-                raw = match_bili_json.group(0)
-                url = raw.replace("\\\\", "\\").replace("\\/", "/")
+        if match_bili:
+            url = match_bili.group(1)
 
             # bvid/av 可能位于 query 参数中
             if not (REG_BV.search(url) or REG_AV.search(url) or REG_B23.search(url)):
-                _fallback_id = REG_BV.search(message_str) or REG_AV.search(message_str)
+                _fallback_id = REG_BV.search(match_text) or REG_AV.search(match_text)
                 if _fallback_id:
                     url = _fallback_id.group(0)
                     logger.info(f"从消息中提取到 B站视频号：{url}")
@@ -1533,10 +1814,7 @@ async def auto_parse_dispatcher(
                         self, event, url, "bilibili"
                     )
                     if status == "hit":
-                        async for response in send_cached_result(
-                            self, event, cached_entry, "bilibili"
-                        ):
-                            yield response
+                        await send_cached_result(self, event, cached_entry, "bilibili")
                         return
                     if status == "blocked":
                         return
@@ -1555,25 +1833,10 @@ async def auto_parse_dispatcher(
     if "nga" in _enabled_platforms:
         match_nga = re.search(
             r"(https?://(?:bbs\.nga\.cn|nga\.178\.com|ngabbs\.com)/read\.php\?tid=\d+)",
-            message_str,
+            match_text,
         )
-        match_nga_json = None
-        if not match_nga:
-            match_nga_json = re.search(
-                r"(https?://(?:bbs\.nga\.cn|nga\.178\.com|ngabbs\.com)/read\.php\?tid=\d+)",
-                message_obj_str,
-            )
-        if not match_nga and not match_nga_json:
-            match_nga_json = re.search(
-                r"https:\\\\/\\\\/(?:bbs\.nga\.cn|nga\.178\.com|ngabbs\.com)\\\\/read\.php\?tid=\d+",
-                message_obj_str,
-            )
-        if match_nga or match_nga_json:
-            url = (
-                match_nga.group(1)
-                if match_nga
-                else match_nga_json.group(0).replace("\\", "")
-            )
+        if match_nga:
+            url = match_nga.group(1)
             logger.info(f"成功匹配到 NGA 链接：{url}")
             parse_guard_key = None
             if not _throttle_whitelisted and not self._is_admin_event(event):
@@ -1595,29 +1858,15 @@ async def auto_parse_dispatcher(
 
     # --- 4. 检查 贴吧 链接 ---
     if "tieba" in _enabled_platforms:
-        match_tieba = re.search(r"((?:https?://)?tieba\.baidu\.com/p/\d+)", message_str)
-
-        match_tieba_json = None
+        match_tieba = re.search(r"((?:https?://)?tieba\.baidu\.com/p/\d+)", match_text)
+        mini_app_match = None
         if not match_tieba:
-            match_tieba_json = re.search(
-                r"(?:https?://)?tieba\.baidu\.com/p/\d+", message_obj_str
-            )
-        if not match_tieba and not match_tieba_json:
-            match_tieba_json = re.search(
-                r"(?:https?:)?\\\\/\\\\/tieba\.baidu\.com\\\\/p\\\\/\d+",
-                message_obj_str,
-            )
-        if not match_tieba and not match_tieba_json:
-            m = re.search(r"m\.q\.qq\.com/a/s/\w+", message_obj_str)
-            if m and "贴吧" in message_obj_str:
-                match_tieba_json = m
+            m = re.search(r"m\.q\.qq\.com/a/s/\w+", match_text)
+            if m and "贴吧" in match_text:
+                mini_app_match = m
 
-        if match_tieba or match_tieba_json:
-            if match_tieba:
-                url = match_tieba.group(1)
-            else:
-                raw = match_tieba_json.group(0)
-                url = raw.replace("\\\\", "\\").replace("\\/", "/")
+        if match_tieba or mini_app_match:
+            url = match_tieba.group(1) if match_tieba else mini_app_match.group(0)
             if not url.startswith("http"):
                 url = "https://" + url
 
@@ -1646,39 +1895,16 @@ async def auto_parse_dispatcher(
     if "xiaohongshu" in _enabled_platforms:
         _XHS_RE = r"[a-zA-Z0-9\-_/]+(?:\?[^\s<>\"'()]*)?"
         match_xhs = re.search(
-            r"(https?://xhslink\.(?:com|cn)/" + _XHS_RE + r")", message_str
+            r"(https?://xhslink\.(?:com|cn)/" + _XHS_RE + r")", match_text
         ) or re.search(
             r"(https?://(?:www\.)?(?:xiaohongshu|rednote)\.com/(?:explore|discovery/item)/"
             + _XHS_RE
             + r")",
-            message_str,
+            match_text,
         )
-        match_xhs_json = None
-        if not match_xhs:
-            _XHS_RE_ESC = r"[a-zA-Z0-9\-_\\\\/]+(?:\?[^\s<>\"'()\\\\]*)?"
-            match_xhs_json = re.search(
-                r"https?://xhslink\.(?:com|cn)/" + _XHS_RE_ESC, message_obj_str
-            ) or re.search(
-                r"https?://(?:www\.)?(?:xiaohongshu|rednote)\.com/(?:explore|discovery/item)/"
-                + _XHS_RE_ESC,
-                message_obj_str,
-            )
-        if not match_xhs and not match_xhs_json:
-            match_xhs_json = re.search(
-                r"https?:\\\\/\\\\/xhslink\.(?:com|cn)\\\\/" + _XHS_RE_ESC,
-                message_obj_str,
-            ) or re.search(
-                r"https?:\\\\/\\\\/(?:www\.)?(?:xiaohongshu|rednote)\\.com\\\\/(?:explore|discovery\\\\/item)\\\\/"
-                + _XHS_RE_ESC,
-                message_obj_str,
-            )
 
-        if match_xhs or match_xhs_json:
-            if match_xhs:
-                url = match_xhs.group(1)
-            else:
-                raw = match_xhs_json.group(0)
-                url = raw.replace("\\\\", "\\").replace("\\/", "/")
+        if match_xhs:
+            url = match_xhs.group(1)
             logger.info(f"成功匹配到小红书链接：{url}")
 
             parse_guard_key = None
@@ -1694,10 +1920,7 @@ async def auto_parse_dispatcher(
                         self, event, url, "xhs"
                     )
                     if status == "hit":
-                        async for response in send_cached_result(
-                            self, event, cached_entry, "xhs"
-                        ):
-                            yield response
+                        await send_cached_result(self, event, cached_entry, "xhs")
                         return
                     if status == "blocked":
                         return
@@ -1714,18 +1937,18 @@ async def auto_parse_dispatcher(
     # --- 2. 检查 抖音 链接 ---
     if "douyin" in _enabled_platforms:
         match_douyin = (
-            re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", message_str)
+            re.search(r"(https?://v\.douyin\.com/[a-zA-Z0-9\-\/_]+)", match_text)
             or re.search(
                 r"(https?://(?:www\.)?douyin\.com/(?:video|note|slides)/\d+)",
-                message_str,
+                match_text,
             )
             or re.search(
                 r"(https?://(?:www\.)?iesdouyin\.com/share/(?:video|note|slides)/\d+)",
-                message_str,
+                match_text,
             )
             or re.search(
                 r"(https?://(?:www\.)?douyin\.com/(?:discover|user)/?\S*modal_id=\d+)",
-                message_str,
+                match_text,
             )
         )
 
@@ -1756,10 +1979,7 @@ async def auto_parse_dispatcher(
                         self, event, url, "douyin"
                     )
                     if status == "hit":
-                        async for response in send_cached_result(
-                            self, event, cached_entry, "douyin"
-                        ):
-                            yield response
+                        await send_cached_result(self, event, cached_entry, "douyin")
                         return
                     if status == "blocked":
                         return

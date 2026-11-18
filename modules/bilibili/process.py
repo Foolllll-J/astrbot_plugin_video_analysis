@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 
@@ -9,6 +10,9 @@ from .download import (
     download_video_with_login,
     download_video_no_login,
 )
+from ..download_io import DownloadLimitExceeded, SizePrecheckExceeded
+
+_SIZE_EXCEPTIONS = (asyncio.CancelledError, SizePrecheckExceeded, DownloadLimitExceeded)
 
 
 def _safe_filename(text: str, max_len: int = 40) -> str:
@@ -35,6 +39,7 @@ async def process_bili_video(
     use_login: bool = True,
     event=None,
     download_dir: str | None = None,
+    max_size_mb: float | None = None,
 ) -> dict:
     logger.debug(f"开始处理 B站 链接: {url}")
 
@@ -99,7 +104,12 @@ async def process_bili_video(
                     quality=quality,
                     title=title,
                     owner_name=owner_name,
+                    max_size_mb=max_size_mb,
+                    duration=video_info.duration,
                 )
+            except _SIZE_EXCEPTIONS:
+                # 取消 / 超限异常交给上层降档，不作普通失败处理
+                raise
             except Exception as e:
                 logger.warning(f"高清下载失败: {e}")
                 logger.debug("尝试降级到 360p 无需登录模式...")
@@ -111,8 +121,12 @@ async def process_bili_video(
                         quality=16,
                         title=title,
                         owner_name=owner_name,
+                        max_size_mb=max_size_mb,
+                        duration=video_info.duration,
                     )
                     logger.debug(f"360p 降级下载成功: {filename}")
+                except _SIZE_EXCEPTIONS:
+                    raise
                 except Exception as fallback_e:
                     logger.error(f"360p 降级下载也失败: {fallback_e}")
                     return {"error": f"360p 降级下载也失败: {fallback_e}"}
@@ -126,7 +140,11 @@ async def process_bili_video(
                     quality=16,
                     title=title,
                     owner_name=owner_name,
+                    max_size_mb=max_size_mb,
+                    duration=video_info.duration,
                 )
+            except _SIZE_EXCEPTIONS:
+                raise
             except Exception as e:
                 logger.warning(f"360p 下载失败: {e}")
                 return {"error": f"360p 下载失败: {e}"}

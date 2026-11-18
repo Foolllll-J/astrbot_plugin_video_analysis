@@ -10,11 +10,9 @@ from .constants import (
     REG_BILI_LIVE,
     REG_BILI_DYNAMIC,
     REG_BILI_SPACE,
-    API_BY_AID,
-    API_BY_BVID,
 )
 from .model import BiliVideoInfo
-from .utils import bili_request, format_number, build_request_cookies
+from .utils import fetch_video_info, format_number, build_request_cookies
 
 
 class UnsupportedBiliLinkError(Exception):
@@ -67,13 +65,11 @@ async def parse_av(av_str: str) -> BiliVideoInfo | None:
 
 async def parse_video(bvid: str) -> BiliVideoInfo | None:
     bvid = str(bvid or "").strip()
+    cookies = await build_request_cookies()
     if REG_AV.fullmatch(bvid):
-        aid = _extract_aid(bvid)
-        api_url = API_BY_AID.format(aid)
+        data = await fetch_video_info(aid=_extract_aid(bvid), cookies=cookies)
     else:
-        api_url = API_BY_BVID.format(bvid)
-
-    data = await bili_request(api_url, cookies=await build_request_cookies())
+        data = await fetch_video_info(bvid=bvid, cookies=cookies)
     if data.get("code") != 0:
         logger.warning(
             f"Bilibili API 返回错误: code={data.get('code')}, message={data.get('message', '')}"

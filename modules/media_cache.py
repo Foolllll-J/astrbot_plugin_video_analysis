@@ -49,17 +49,16 @@ async def forward_long_text(
     set_emoji_fn: SetEmojiFn | None = None,
     text_sender_name: str = "抖音文案",
     media_sender_name: str = "抖音内容",
-):
-    """文本超长时，将文本与媒体组合为合并转发发送（非 aiocqhttp 平台自动降级）。"""
-    async for response in send_douyin_with_title_forward(
+) -> None:
+    """文本超长时组合转发；实际发送在下游 await 完成。"""
+    await send_douyin_with_title_forward(
         event,
         text,
         result,
         set_emoji_fn=set_emoji_fn,
         text_sender_name=text_sender_name,
         media_sender_name=media_sender_name,
-    ):
-        yield response
+    )
 
 
 _DOUYIN_ID_RE = re.compile(
@@ -207,6 +206,38 @@ class MediaCache:
                     data.pop(platform, None)
                 await self._save(data)
 
+    async def remove_paths(self, paths: list[str]) -> int:
+        """文件被清理后联动删除引用它们的缓存条目，保持条目与实际文件一致。"""
+        deleted = {os.path.abspath(p) for p in paths if p}
+        if not deleted:
+            return 0
+        async with self._lock:
+            data = await self._load()
+            if not data:
+                return 0
+            removed = 0
+            for platform, items in list(data.items()):
+                if not isinstance(items, dict):
+                    continue
+                for content_id, entry in list(items.items()):
+                    if not isinstance(entry, dict):
+                        continue
+                    files = entry.get("media_files") or []
+                    stale = any(
+                        (not (f.get("path") and os.path.exists(f["path"])))
+                        or os.path.abspath(str(f.get("path") or "")) in deleted
+                        for f in files
+                    )
+                    if stale:
+                        items.pop(content_id, None)
+                        removed += 1
+                if not items:
+                    data.pop(platform, None)
+            if removed:
+                await self._save(data)
+                logger.debug(f"文件清理联动删除 {removed} 个缓存条目")
+            return removed
+
     async def cleanup(self, ttl_sec: int) -> int:
         """删除过期或文件已缺失的条目，返回清理条数（与文件自动清理联动）。"""
         async with self._lock:
@@ -327,8 +358,8 @@ async def lookup_cached_media(plugin, event, url: str, platform: str):
         return "miss", None
 
 
-async def send_cached_result(plugin, event, entry: dict, platform: str):
-    """按缓存条目直接发送本地媒体（与正常发送分支行为一致）。"""
+async def send_cached_result(plugin, event, entry: dict, platform: str) -> None:
+    """缓存重发：与正常发送共用实际发送链路。"""
     result = entry_to_result(entry)
     await plugin._set_emoji(event, 424)
 
@@ -344,7 +375,7 @@ async def send_cached_result(plugin, event, entry: dict, platform: str):
             text = result.get("title") or ""
             text_sender, media_sender = SENDER_NAMES["douyin"]
         if visible_len(text) > plugin.text_forward_threshold:
-            async for response in forward_long_text(
+            await forward_long_text(
                 event,
                 text,
                 result,
@@ -353,15 +384,12 @@ async def send_cached_result(plugin, event, entry: dict, platform: str):
                 ),
                 text_sender_name=text_sender,
                 media_sender_name=media_sender,
-            ):
-                yield response
+            )
             return
 
     if result.get("video_path") and os.path.exists(result["video_path"]):
-        async for response in plugin._process_and_send(event, result, platform):
-            yield response
+        await plugin._process_and_send(event, result, platform)
         return
 
     sender_name = SENDER_NAMES.get(platform, ("抖音文案", "抖音内容"))[1]
-    async for response in plugin._send_douyin_multimedia(event, result, sender_name):
-        yield response
+    await plugin._send_douyin_multimedia(event, result, sender_name)

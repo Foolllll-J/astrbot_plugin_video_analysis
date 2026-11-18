@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import re
@@ -11,6 +12,13 @@ from astrbot.api import logger
 
 from .model import DouyinParseResult, _clean_video_url, _is_bytevc2
 from .constants import DOWNLOAD_HEADERS, DOWNLOAD_TIMEOUT
+from ..download_io import (
+    IncompleteDownloadError,
+    extract_size_from_headers,
+    remove_quietly,
+    replace_file,
+    unique_temp_path,
+)
 
 
 def _safe_filename(text: str, max_len: int = 40) -> str:
@@ -60,7 +68,7 @@ class DouyinDownloader:
 
         os.makedirs(self.download_dir, exist_ok=True)
 
-        if result.source in ("web_api", "share_page", "mobile_api"):
+        if result.source in ("web_api", "share_page", "mobile_api", "anonymous_web"):
             return await self._download_local(result, url)
         elif result.source == "third_party":
             return await self._download_third_party(result, url)
@@ -69,6 +77,7 @@ class DouyinDownloader:
     async def _try_download_one(
         self, url: str, save_path: str, label: str = ""
     ) -> bool:
+        temp_path = unique_temp_path(save_path)
         try:
             async with httpx.AsyncClient(
                 timeout=DOWNLOAD_TIMEOUT, verify=False
@@ -77,11 +86,16 @@ class DouyinDownloader:
                     "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
                 ) as resp:
                     resp.raise_for_status()
-                    total = int(resp.headers.get("content-length", 0))
+                    expected = None
+                    if not resp.headers.get("content-encoding"):
+                        expected = extract_size_from_headers(
+                            resp.headers, resp.status_code
+                        )
+                    total = expected or 0
                     downloaded = 0
                     start_time = time.monotonic()
                     last_log = start_time
-                    async with aiofiles.open(save_path, "wb") as f:
+                    async with aiofiles.open(temp_path, "wb") as f:
                         async for chunk in resp.aiter_bytes():
                             await f.write(chunk)
                             downloaded += len(chunk)
@@ -108,12 +122,24 @@ class DouyinDownloader:
                                     logger.debug(
                                         f"{label}下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
                                     )
+                        await f.flush()
+                    if downloaded <= 0:
+                        raise IncompleteDownloadError("文件下载为空")
+                    if expected is not None and downloaded != expected:
+                        raise IncompleteDownloadError(
+                            f"下载长度不完整: {downloaded}/{expected}"
+                        )
+            # 校验通过后原子替换
+            replace_file(temp_path, save_path)
+            temp_path = None
+            return True
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            if os.path.exists(save_path):
-                os.remove(save_path)
             return False
-
-        return True
+        finally:
+            if temp_path:
+                remove_quietly(temp_path)
 
     def _preselect_video_urls(self, result: DouyinParseResult) -> list[str]:
         """主下载路径的 data_size 前置预选。
@@ -215,9 +241,7 @@ class DouyinDownloader:
         media_items = []
         for i, item in enumerate(result.media_items):
             if len(media_items) >= self.max_images:
-                logger.debug(
-                    f"媒体数量达到上限 {self.max_images}，跳过后续媒体。"
-                )
+                logger.debug(f"媒体数量达到上限 {self.max_images}，跳过后续媒体。")
                 break
 
             candidate_urls: list[str] = item.get("urls") or []
@@ -431,6 +455,7 @@ class DouyinDownloader:
         return None
 
     async def _download_file(self, url: str, save_path: str) -> bool:
+        temp_path = unique_temp_path(save_path)
         try:
             async with httpx.AsyncClient(
                 timeout=DOWNLOAD_TIMEOUT, verify=False
@@ -439,11 +464,16 @@ class DouyinDownloader:
                     "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
                 ) as response:
                     response.raise_for_status()
-                    total = int(response.headers.get("content-length", 0))
+                    expected = None
+                    if not response.headers.get("content-encoding"):
+                        expected = extract_size_from_headers(
+                            response.headers, response.status_code
+                        )
+                    total = expected or 0
                     downloaded = 0
                     start_time = time.monotonic()
                     last_log = start_time
-                    async with aiofiles.open(save_path, "wb") as f:
+                    async with aiofiles.open(temp_path, "wb") as f:
                         async for chunk in response.aiter_bytes():
                             await f.write(chunk)
                             downloaded += len(chunk)
@@ -470,15 +500,27 @@ class DouyinDownloader:
                                     logger.debug(
                                         f"抖音下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
                                     )
+                        await f.flush()
+                    if downloaded <= 0:
+                        raise IncompleteDownloadError("文件下载为空")
+                    if expected is not None and downloaded != expected:
+                        raise IncompleteDownloadError(
+                            f"下载长度不完整: {downloaded}/{expected}"
+                        )
+            replace_file(temp_path, save_path)
+            temp_path = None
             return True
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             response = getattr(e, "response", None)
             status = getattr(response, "status_code", None)
             reason = f"HTTP {status}" if status else type(e).__name__
             logger.error(f"文件下载失败: {_safe_url_for_log(url)}，{reason}")
-            if os.path.exists(save_path):
-                os.remove(save_path)
             return False
+        finally:
+            if temp_path:
+                remove_quietly(temp_path)
 
     @staticmethod
     def _build_result(

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 from urllib.parse import urlparse, unquote
@@ -8,6 +9,7 @@ from astrbot.api import logger
 
 from .constants import DOWNLOAD_HEADERS, IMAGE_EXTS, TIMEOUT
 from .model import TiebaParseResult
+from ..download_io import remove_quietly, replace_file, unique_temp_path
 
 
 class TiebaDownloader:
@@ -28,6 +30,7 @@ class TiebaDownloader:
         dest = os.path.join(self.download_dir, name)
         if os.path.exists(dest):
             return dest
+        temp_path = unique_temp_path(dest)
         try:
             async with httpx.AsyncClient(
                 timeout=TIMEOUT, headers=DOWNLOAD_HEADERS
@@ -35,12 +38,21 @@ class TiebaDownloader:
                 resp = await cli.get(url, follow_redirects=True)
                 resp.raise_for_status()
                 content = resp.content
-            with open(dest, "wb") as f:
+            if not content:
+                return None
+            with open(temp_path, "wb") as f:
                 f.write(content)
+            replace_file(temp_path, dest)
+            temp_path = None
             return dest
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"贴吧下载失败: {url} -> {e}")
             return None
+        finally:
+            if temp_path:
+                remove_quietly(temp_path)
 
     async def download(self, parse_result: TiebaParseResult, url: str) -> dict:
         if not parse_result.success:

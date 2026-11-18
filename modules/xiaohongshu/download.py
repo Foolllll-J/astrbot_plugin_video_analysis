@@ -14,6 +14,13 @@ from astrbot.api import logger
 
 from .model import XiaohongshuParseResult
 from .constants import DOWNLOAD_HEADERS, DEFAULT_TIMEOUT
+from ..download_io import (
+    IncompleteDownloadError,
+    extract_size_from_headers,
+    remove_quietly,
+    replace_file,
+    unique_temp_path,
+)
 
 
 def _safe_filename(text: str, max_len: int = 40) -> str:
@@ -99,6 +106,7 @@ class XiaohongshuDownloader:
         if ".m3u8" in url.lower():
             return await self._download_m3u8(url, save_path)
         for attempt in range(2):
+            temp_path = unique_temp_path(save_path)
             try:
                 async with httpx.AsyncClient(
                     timeout=DEFAULT_TIMEOUT, verify=False
@@ -107,11 +115,16 @@ class XiaohongshuDownloader:
                         "GET", url, headers=DOWNLOAD_HEADERS, follow_redirects=True
                     ) as response:
                         response.raise_for_status()
-                        total = int(response.headers.get("content-length", 0))
+                        expected = None
+                        if not response.headers.get("content-encoding"):
+                            expected = extract_size_from_headers(
+                                response.headers, response.status_code
+                            )
+                        total = expected or 0
                         downloaded = 0
                         start_time = time.monotonic()
                         last_log = start_time
-                        async with aiofiles.open(save_path, "wb") as f:
+                        async with aiofiles.open(temp_path, "wb") as f:
                             async for chunk in response.aiter_bytes():
                                 await f.write(chunk)
                                 downloaded += len(chunk)
@@ -138,15 +151,27 @@ class XiaohongshuDownloader:
                                         logger.debug(
                                             f"小红书下载中... {mb:.0f}MB 已用{elapsed / 60:.0f}m"
                                         )
+                            await f.flush()
+                        if downloaded <= 0:
+                            raise IncompleteDownloadError("文件下载为空")
+                        if expected is not None and downloaded != expected:
+                            raise IncompleteDownloadError(
+                                f"下载长度不完整: {downloaded}/{expected}"
+                            )
+                replace_file(temp_path, save_path)
+                temp_path = None
                 return True
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"XHS 文件下载失败 (attempt {attempt + 1}): {url}, 错误: {e}"
                 )
                 if attempt == 0:
                     await asyncio.sleep(1)
-                if os.path.exists(save_path):
-                    os.remove(save_path)
+            finally:
+                if temp_path:
+                    remove_quietly(temp_path)
         return False
 
     async def _download_m3u8(self, m3u8_url: str, output_path: str) -> bool:
@@ -207,6 +232,7 @@ class XiaohongshuDownloader:
             return False
 
         tmpdir = tempfile.mkdtemp(prefix="xhs_m3u8_")
+        merge_temp = unique_temp_path(output_path)
         seg_files = []
         try:
             for i, seg_url in enumerate(seg_urls):
@@ -236,7 +262,7 @@ class XiaohongshuDownloader:
                 else:
                     raise RuntimeError(f"分片 {i} 下载失败")
 
-            async with aiofiles.open(output_path, "wb") as out:
+            async with aiofiles.open(merge_temp, "wb") as out:
                 for seg_path in seg_files:
                     async with aiofiles.open(seg_path, "rb") as inp:
                         while True:
@@ -244,13 +270,20 @@ class XiaohongshuDownloader:
                             if not chunk:
                                 break
                             await out.write(chunk)
+                await out.flush()
+            if os.path.getsize(merge_temp) <= 0:
+                raise IncompleteDownloadError("M3U8 拼接结果为空")
+            replace_file(merge_temp, output_path)
+            merge_temp = None
             return True
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning(f"XHS M3U8 拼接失败: {e}")
-            if os.path.exists(output_path):
-                os.remove(output_path)
             return False
         finally:
+            if merge_temp:
+                remove_quietly(merge_temp)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     @staticmethod

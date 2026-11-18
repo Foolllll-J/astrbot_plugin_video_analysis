@@ -1,9 +1,14 @@
 import asyncio
 import base64
+import hashlib
 import json
 import os
+import tempfile
+import time
 from io import BytesIO
-from urllib.parse import unquote
+from pathlib import Path
+from typing import NamedTuple, Optional
+from urllib.parse import unquote, urlencode
 
 import aiofiles
 import aiohttp
@@ -16,7 +21,14 @@ from .constants import (
     DEFAULT_HEADERS,
     COOKIE_CHECK_HEADERS,
     BUVID_API,
+    API_BY_AID,
+    API_BY_BVID,
+    VIEW_WBI_API,
+    NAV_API,
+    MIXIN_KEY_ENC_TAB,
+    WBI_KEY_TTL_SECONDS,
 )
+from ..download_io import LoopLocalLock, remove_quietly
 
 COOKIE_FILE: str | None = None
 COOKIE_VALID: bool | None = None
@@ -46,6 +58,106 @@ LOGIN_COOKIE_KEYS = {
 }
 
 _BUVID_CACHE: tuple[str, str] | None = None
+
+
+# ---------------------------------------------------------------------------
+# 错误分类：网络 / 业务 / 风控，回退只针对风控错误
+# ---------------------------------------------------------------------------
+
+
+class BiliNetworkError(RuntimeError):
+    """传输层错误（连接、超时、非 JSON 等）。"""
+
+
+class BiliBusinessError(RuntimeError):
+    """接口明确返回的业务错误（非风控）。"""
+
+    def __init__(self, code, message: str = ""):
+        super().__init__(f"code={code} {message}")
+        self.code = code
+
+
+class BiliRiskControlError(RuntimeError):
+    """HTTP 412 / code -412 风控错误，允许有限次 WBI 回退。"""
+
+
+# ---------------------------------------------------------------------------
+# WBI 签名（密钥缓存 + TTL）
+# ---------------------------------------------------------------------------
+
+_WBI_LOCK = LoopLocalLock()
+_WBI_MIXIN_KEY = ""
+_WBI_EXPIRES_AT = 0.0
+
+
+def _extract_key_from_url(url: str) -> str:
+    return Path(str(url or "").split("?", 1)[0]).stem
+
+
+def _get_mixin_key(img_key: str, sub_key: str) -> str:
+    raw = img_key + sub_key
+    # nav 返回的 img_key/sub_key 各 32 字符；异常响应不能导致越界或生成错误签名。
+    if len(raw) <= max(MIXIN_KEY_ENC_TAB):
+        raise BiliBusinessError(-1, "WBI 密钥长度异常，拒绝生成签名")
+    return "".join(raw[i] for i in MIXIN_KEY_ENC_TAB)[:32]
+
+
+async def get_wbi_mixin_key() -> str:
+    """拉取 nav 中的 WBI 密钥并缓存；并发只拉取一次，TTL 到期后刷新。"""
+    global _WBI_MIXIN_KEY, _WBI_EXPIRES_AT
+    async with _WBI_LOCK.get():
+        if _WBI_MIXIN_KEY and time.monotonic() < _WBI_EXPIRES_AT:
+            return _WBI_MIXIN_KEY
+        headers = dict(DEFAULT_HEADERS)
+        headers["Accept"] = "application/json, text/plain, */*"
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(NAV_API, headers=headers) as resp:
+                    if resp.status == 412:
+                        raise BiliRiskControlError("nav 接口 HTTP 412")
+                    if resp.status >= 400:
+                        raise BiliNetworkError(f"nav 接口 HTTP {resp.status}")
+                    payload = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            raise BiliNetworkError(f"获取 WBI 密钥网络失败: {type(e).__name__}") from e
+        if not isinstance(payload, dict):
+            raise BiliBusinessError(-1, "nav 响应格式异常")
+        wbi_img = (payload.get("data") or {}).get("wbi_img") or {}
+        img_key = _extract_key_from_url(str(wbi_img.get("img_url", "")))
+        sub_key = _extract_key_from_url(str(wbi_img.get("sub_url", "")))
+        if not img_key or not sub_key:
+            raise BiliBusinessError(-1, "nav 未返回 img_key/sub_key")
+        mixin_key = _get_mixin_key(img_key, sub_key)
+        _WBI_MIXIN_KEY = mixin_key
+        _WBI_EXPIRES_AT = time.monotonic() + WBI_KEY_TTL_SECONDS
+        return mixin_key
+
+
+def sign_wbi_params(params: dict, mixin_key: str) -> dict:
+    """按 WBI 规则为参数追加 wts / w_rid。"""
+    signed = dict(params)
+    signed["wts"] = int(time.time())
+    signed = dict(sorted(signed.items(), key=lambda item: item[0]))
+    filtered: dict = {}
+    for key, value in signed.items():
+        text = str(value)
+        for ch in "!'()*":
+            text = text.replace(ch, "")
+        filtered[key] = text
+    query = urlencode(filtered)
+    filtered["w_rid"] = hashlib.md5((query + mixin_key).encode("utf-8")).hexdigest()
+    return filtered
+
+
+async def wbi_signed_params(params: dict) -> dict:
+    return sign_wbi_params(params, await get_wbi_mixin_key())
+
+
+# ---------------------------------------------------------------------------
+# 基础请求与工具
+# ---------------------------------------------------------------------------
 
 
 async def get_buvid() -> tuple[str, str]:
@@ -99,15 +211,23 @@ def estimate_size(quality_qn: int, duration_seconds: int) -> float:
 def estimate_size_with_plan(
     quality_qn: int, duration_seconds: int, plan: dict
 ) -> float:
-    """优先使用真实码率探测结果估算体积(MB)，缺失时回退静态估算。"""
-    qualities = (plan or {}).get("qualities", {}) or {}
-    # 先按本档真实带宽估算；116(1080P60) 无独立带宽时按同级 112(1080P+) 码率近似
+    """按真实选中的视频流 + 音频流带宽估算体积(MB)，缺失时回退静态估算。"""
+    plan = plan or {}
+    qualities = plan.get("qualities", {}) or {}
     best_id = max([q for q in qualities if q <= quality_qn], default=None)
     info = qualities.get(best_id) if best_id is not None else None
-    if info and info.get("bandwidth"):
-        return (int(info["bandwidth"]) * duration_seconds) / 8 / (1024 * 1024)
+    video_bw = int(info.get("bandwidth") or 0) if isinstance(info, dict) else 0
+    try:
+        audio_bw = int(plan.get("audio_bandwidth") or 0)
+    except (TypeError, ValueError):
+        audio_bw = 0
+    if video_bw:
+        return (video_bw + audio_bw) * duration_seconds / 8 / (1024 * 1024)
     fallback_qn = 112 if quality_qn == 116 else quality_qn
-    return estimate_size(fallback_qn, duration_seconds)
+    base = estimate_size(fallback_qn, duration_seconds)
+    if audio_bw:
+        return base + audio_bw * duration_seconds / 8 / (1024 * 1024)
+    return base
 
 
 def map_quality_to_height(quality_code: int) -> int:
@@ -136,6 +256,7 @@ def format_number(num):
 
 
 async def bili_request(url: str, return_json: bool = True, cookies: dict | None = None):
+    """保留的通用请求接口（其它模块仍可复用）。"""
     if not url or not isinstance(url, str):
         return {"code": -400, "message": "Invalid URL"}
     try:
@@ -157,15 +278,91 @@ async def bili_request(url: str, return_json: bool = True, cookies: dict | None 
         return {"code": -400, "message": "Request timeout"}
 
 
+async def _view_once(session, url: str, params, headers: dict, cookies) -> dict:
+    """单次视频信息请求，按网络/业务/风控分类。"""
+    try:
+        async with session.get(
+            url, params=params, headers=headers, cookies=cookies or None
+        ) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(f"视频信息接口 HTTP 412: {url}")
+            if resp.status >= 400:
+                raise BiliNetworkError(f"视频信息接口 HTTP {resp.status}: {url}")
+            try:
+                data = await resp.json(content_type=None)
+            except (ValueError, aiohttp.ContentTypeError) as e:
+                raise BiliBusinessError(-1, "视频信息接口返回非 JSON") from e
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        raise BiliNetworkError(f"视频信息接口网络失败: {type(e).__name__}") from e
+    if not isinstance(data, dict):
+        raise BiliBusinessError(-1, "视频信息接口响应格式异常")
+    if data.get("code") == -412:
+        raise BiliRiskControlError("视频信息接口 code=-412")
+    return data
+
+
+async def fetch_video_info(
+    *, bvid: str = "", aid: str = "", cookies: dict | None = None
+) -> dict:
+    """视频信息接口：普通 view 触发 412/-412 时，有限一次 WBI 签名回退。"""
+    params = {"bvid": bvid} if bvid else {"aid": aid}
+    api_url = API_BY_BVID.format(bvid) if bvid else API_BY_AID.format(aid)
+    headers = dict(DEFAULT_HEADERS)
+    headers["Accept"] = "application/json, text/plain, */*"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as session:
+            try:
+                return await _view_once(session, api_url, None, headers, cookies)
+            except BiliRiskControlError as first:
+                logger.warning(f"视频信息接口触发风控，尝试 WBI 签名回退: {first}")
+                try:
+                    signed = await wbi_signed_params(params)
+                    return await _view_once(
+                        session, VIEW_WBI_API, signed, headers, cookies
+                    )
+                except (BiliRiskControlError, BiliNetworkError, BiliBusinessError) as e:
+                    logger.warning(f"视频信息接口 WBI 回退失败: {e}")
+                    return {"code": -412, "message": f"WBI 回退失败: {e}"}
+    except BiliNetworkError as e:
+        return {"code": -400, "message": str(e)}
+    except BiliBusinessError as e:
+        return {"code": -400, "message": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Cookie 持久化、校验与登录
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_REVISION = 0
+_COOKIE_LOCK = LoopLocalLock()
+_VALIDATION_CACHE = {
+    "fingerprint": "",
+    "revision": -1,
+    "result": None,
+    "at": 0.0,
+}
+
+
+def _cookie_fingerprint(cookies: dict) -> str:
+    payload = json.dumps(cookies, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _reset_validation_cache() -> None:
+    _VALIDATION_CACHE.update(
+        {"fingerprint": "", "revision": -1, "result": None, "at": 0.0}
+    )
+
+
 async def load_cookies() -> dict | None:
     if not COOKIE_FILE or not os.path.exists(COOKIE_FILE):
-        logger.warning(f"Cookie 文件不存在: {COOKIE_FILE}")
         return None
     try:
         async with aiofiles.open(COOKIE_FILE, "r", encoding="utf-8") as f:
             content = await f.read()
         if not content.strip():
-            logger.warning("Cookie 文件为空")
             return None
         return json.loads(content)
     except json.JSONDecodeError:
@@ -177,22 +374,72 @@ async def load_cookies() -> dict | None:
 
 
 async def save_cookies_dict(cookies: dict) -> bool:
+    """原子落盘 + 尽量限制文件权限；成功后提升凭据版本并清掉旧校验缓存。"""
+    global _CREDENTIAL_REVISION
+    if not COOKIE_FILE:
+        logger.error("保存 Cookie 失败: 未初始化 Cookie 路径")
+        return False
+    temp_path = ""
     try:
-        async with aiofiles.open(COOKIE_FILE, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(cookies, ensure_ascii=False, indent=2))
+        async with _COOKIE_LOCK.get():
+            parent = os.path.dirname(COOKIE_FILE) or "."
+            os.makedirs(parent, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(
+                prefix="bili_cookies.", suffix=".tmp", dir=parent
+            )
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(cookies, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.name == "posix":
+                try:
+                    os.chmod(temp_path, 0o600)
+                except OSError:
+                    pass
+            os.replace(temp_path, COOKIE_FILE)
+            temp_path = ""
+            _CREDENTIAL_REVISION += 1
+            _reset_validation_cache()
         logger.info(f"Cookie 已保存到: {COOKIE_FILE}")
         return True
     except Exception as e:
         logger.error(f"保存 Cookie 失败: {e}")
         return False
+    finally:
+        if temp_path:
+            remove_quietly(temp_path)
 
 
-async def check_cookie_valid() -> bool:
+async def _validate_cookie_remote(cookies: dict) -> Optional[bool]:
+    """远程校验；临时网络失败/不确定业务码返回 None，不判定凭据失效。"""
+    url = "https://api.bilibili.com/x/member/web/account"
+    headers = dict(COOKIE_CHECK_HEADERS)
+    headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    try:
+        async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(url, headers=headers, timeout=timeout) as resp:
+                if resp.status >= 500:
+                    return None
+                data = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("code") == 0:
+        api_mid = str((data.get("data") or {}).get("mid", ""))
+        return api_mid == str(cookies.get("DedeUserID", ""))
+    if data.get("code") == -101:
+        return False
+    return None
+
+
+async def check_cookie_valid_detailed(force: bool = False) -> Optional[bool]:
+    """返回 True/False/None(临时网络失败)；缓存绑定凭据指纹与版本。"""
     global COOKIE_VALID
-    COOKIE_VALID = None
     cookies = await load_cookies()
     if not cookies:
-        logger.debug("未找到 Cookie 文件或 Cookie 文件为空，需要登录")
+        COOKIE_VALID = False
         return False
 
     required_fields = {
@@ -202,29 +449,58 @@ async def check_cookie_valid() -> bool:
     }
     for field, validator in required_fields.items():
         if field not in cookies or not validator(str(cookies[field])):
-            logger.debug(f"Cookie 字段验证失败: {field}")
+            COOKIE_VALID = False
             return False
 
-    url = "https://api.bilibili.com/x/member/web/account"
-    cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-    headers = dict(COOKIE_CHECK_HEADERS)
-    headers["Cookie"] = cookie_str
+    fingerprint = _cookie_fingerprint(cookies)
+    async with _COOKIE_LOCK.get():
+        revision = _CREDENTIAL_REVISION
+        cached = dict(_VALIDATION_CACHE)
+    if not force and cached["result"] is not None:
+        ttl = 300 if cached["result"] else 60
+        if (
+            cached["fingerprint"] == fingerprint
+            and cached["revision"] == revision
+            and time.monotonic() - cached["at"] < ttl
+        ):
+            COOKIE_VALID = cached["result"]
+            return cached["result"]
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with session.get(url, headers=headers, timeout=timeout) as response:
-                data = await response.json()
-                if data.get("code") == 0:
-                    api_mid = str(data.get("data", {}).get("mid", ""))
-                    cookie_mid = str(cookies.get("DedeUserID", ""))
-                    if api_mid == cookie_mid:
-                        COOKIE_VALID = True
-                        return True
-                return False
-    except Exception as e:
-        logger.warning(f"验证 Cookie 有效性时异常: {e}")
-        return False
+    result = await _validate_cookie_remote(cookies)
+    async with _COOKIE_LOCK.get():
+        # 校验期间发生了新登录：旧结果不得污染新凭据的缓存
+        if revision != _CREDENTIAL_REVISION:
+            current = dict(_VALIDATION_CACHE)
+            logger.debug("Cookie 校验期间凭据已更新，丢弃旧校验结果")
+            if (
+                current["result"] is not None
+                and current["revision"] == _CREDENTIAL_REVISION
+            ):
+                COOKIE_VALID = current["result"]
+                return current["result"]
+            return None
+        if result is not None:
+            _VALIDATION_CACHE.update(
+                {
+                    "fingerprint": fingerprint,
+                    "revision": revision,
+                    "result": result,
+                    "at": time.monotonic(),
+                }
+            )
+            COOKIE_VALID = result
+        elif cached["fingerprint"] == fingerprint and cached["result"] is not None:
+            # 临时网络失败：沿用同指纹的既有结论，不写入「确定失效」
+            COOKIE_VALID = cached["result"]
+            return cached["result"]
+    if result is None:
+        logger.warning("Cookie 有效性校验遇临时网络失败，未能确定凭据状态")
+    return result
+
+
+async def check_cookie_valid(force: bool = False) -> bool:
+    result = await check_cookie_valid_detailed(force=force)
+    return bool(result)
 
 
 async def generate_qrcode(session: aiohttp.ClientSession) -> dict | None:
@@ -256,11 +532,10 @@ async def generate_qrcode(session: aiohttp.ClientSession) -> dict | None:
     img = qr.make_image(fill_color="black", back_color="white")
     buffered = BytesIO()
     img.save(buffered, format="PNG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-
     return {
         "qrcode_key": qr_data["qrcode_key"],
-        "image_base64": img_str,
+        "image_base64": base64.b64encode(buffered.getvalue()).decode(),
+        "image_bytes": buffered.getvalue(),
         "url": qr_data["url"],
     }
 
@@ -275,16 +550,12 @@ async def check_login_status(session: aiohttp.ClientSession, qrcode_key: str) ->
     try:
         async with session.get(url, headers=headers) as response:
             return await response.json()
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         return {"code": -1, "message": "检查登录状态失败"}
 
 
 def _collect_login_cookies(session: aiohttp.ClientSession, redirect_url: str) -> dict:
-    """从轮询跳转 url 参数和 session cookie jar 两处合并登录 Cookie。
-
-    B站可能把 SESSDATA/bili_jct/DedeUserID 放在 url 参数或 Set-Cookie 头里，
-    两处都读才能兼容不同账号与风控状态。
-    """
+    """从轮询跳转 url 参数和 session cookie jar 两处合并登录 Cookie。"""
     cookies: dict = {}
     if "?" in redirect_url:
         for param in redirect_url.split("?", 1)[1].split("&"):
@@ -298,49 +569,92 @@ def _collect_login_cookies(session: aiohttp.ClientSession, redirect_url: str) ->
     return cookies
 
 
+class LoginOutcome(NamedTuple):
+    cookies: Optional[dict]
+    saved: bool
+    reason: str
+
+
+_LOGIN_TIMEOUT_SECONDS = 150
+_LOGIN_TASKS: set = set()
+_ACTIVE_LOGIN_TASK = None
+_LOGIN_GENERATION = 0
+_LOGIN_LOCK = LoopLocalLock()
+
+
 async def check_login_status_loop(
-    session: aiohttp.ClientSession, qrcode_key: str
-) -> dict | None:
-    logger.info("等待登录...（最多150秒）")
+    session: aiohttp.ClientSession,
+    qrcode_key: str,
+    generation: int = 0,
+    timeout_seconds: int = _LOGIN_TIMEOUT_SECONDS,
+) -> LoginOutcome:
+    """总截止时间控制登录超时；只有最新一代流程允许写入凭据。"""
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    logger.info(f"等待登录...（总截止时间 {timeout_seconds} 秒）")
     last_code = None
-    for _ in range(150):
-        await asyncio.sleep(1)
-        status = await check_login_status(session, qrcode_key)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("登录超时（总截止时间），请重试")
+            return LoginOutcome(None, False, "timeout")
+        try:
+            status = await asyncio.wait_for(
+                check_login_status(session, qrcode_key),
+                timeout=min(5.0, remaining),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            status = {"code": -1}
         if status.get("code") != 0:
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
             continue
-        data = status.get("data", {})
+        data = status.get("data", {}) or {}
         poll_code = data.get("code")
         if poll_code == 0:
-            logger.info("B站登录成功!")
             try:
                 cookies = _collect_login_cookies(session, data.get("url", ""))
                 if not cookies.get("SESSDATA") or not cookies.get("DedeUserID"):
                     found = ",".join(sorted(cookies)) or "无"
                     raise ValueError(f"未取到 SESSDATA/DedeUserID，已获取字段: {found}")
-                await save_cookies_dict(cookies)
-                return cookies
             except Exception as e:
                 logger.error(f"登录异常: {e}")
-                return None
-        elif poll_code in (86038, 86105):
+                return LoginOutcome(None, False, str(e))
+            if generation != _LOGIN_GENERATION:
+                logger.warning("旧登录流程已被新流程取代，不覆盖新凭据")
+                return LoginOutcome(None, False, "superseded")
+            saved = await save_cookies_dict(cookies)
+            if not saved:
+                logger.error("B站登录成功但 Cookie 保存失败")
+                return LoginOutcome(cookies, False, "cookie_save_failed")
+            logger.info("B站登录成功，Cookie 已保存")
+            return LoginOutcome(cookies, True, "ok")
+        if poll_code in (86038, 86105):
             logger.warning("二维码已过期，请重新获取")
-            return None
-        elif poll_code != last_code:
-            # 仅在状态变化时记录，避免每秒刷同一条
+            return LoginOutcome(None, False, "expired")
+        if poll_code != last_code:
             msg = {86090: "已扫码，等待手机确认", 86101: "等待扫码"}.get(
                 poll_code, f"轮询返回未知状态码: {poll_code}"
             )
             logger.debug(msg)
         last_code = poll_code
-    logger.warning("登录超时，请重试")
-    return None
+        await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
 
 async def bili_login() -> tuple:
+    """生成二维码并启动唯一的登录任务；旧流程先取消并回收。"""
+    global _ACTIVE_LOGIN_TASK, _LOGIN_GENERATION
+    async with _LOGIN_LOCK.get():
+        previous = _ACTIVE_LOGIN_TASK
+        _LOGIN_GENERATION += 1
+        generation = _LOGIN_GENERATION
+        _ACTIVE_LOGIN_TASK = None
+    if previous is not None and not previous.done():
+        previous.cancel()
+        await asyncio.gather(previous, return_exceptions=True)
+
     logger.info("正在生成 B站 登录二维码...")
-    # generate 与 poll 共用一个 session，让登录时下发的 buvid 自动接力到轮询请求
-    timeout = aiohttp.ClientTimeout(total=20)
-    session = aiohttp.ClientSession(timeout=timeout)
+    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
     try:
         qr_data = await generate_qrcode(session)
     except Exception as e:
@@ -351,14 +665,27 @@ async def bili_login() -> tuple:
         await session.close()
         return None, None
 
-    logger.info("B站 登录二维码已生成，等待扫码...")
     qrcode_key = qr_data["qrcode_key"]
 
-    async def _run() -> dict | None:
+    async def _run() -> LoginOutcome:
         try:
-            return await check_login_status_loop(session, qrcode_key)
+            return await check_login_status_loop(session, qrcode_key, generation)
         finally:
             await session.close()
 
-    login_task = asyncio.create_task(_run())
-    return login_task, qr_data
+    task = asyncio.create_task(_run())
+    _ACTIVE_LOGIN_TASK = task
+    _LOGIN_TASKS.add(task)
+    task.add_done_callback(_LOGIN_TASKS.discard)
+    return task, qr_data
+
+
+async def cancel_bili_login_tasks() -> None:
+    """插件卸载时取消并回收所有登录任务。"""
+    global _ACTIVE_LOGIN_TASK
+    tasks = [t for t in list(_LOGIN_TASKS) if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _ACTIVE_LOGIN_TASK = None

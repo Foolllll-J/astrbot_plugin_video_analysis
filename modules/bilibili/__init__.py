@@ -15,8 +15,15 @@ from .utils import (
     init_bili_module,
     bili_login,
     check_cookie_valid,
+    check_cookie_valid_detailed,
+    cancel_bili_login_tasks,
+    LoginOutcome,
+    BiliNetworkError,
+    BiliBusinessError,
+    BiliRiskControlError,
 )
 from .download import probe_quality_plan, _best_qn, _same_tier, QN_PEERS
+from ..download_io import DownloadLimitExceeded, SizePrecheckExceeded
 
 __all__ = [
     "process_bili_video",
@@ -39,5 +46,13 @@ __all__ = [
     "init_bili_module",
     "bili_login",
     "check_cookie_valid",
+    "check_cookie_valid_detailed",
+    "cancel_bili_login_tasks",
+    "LoginOutcome",
+    "BiliNetworkError",
+    "BiliBusinessError",
+    "BiliRiskControlError",
+    "DownloadLimitExceeded",
+    "SizePrecheckExceeded",
     "UnsupportedBiliLinkError",
 ]
