@@ -31,6 +31,34 @@ TTWID_REGISTER_URL = "https://ttwid.bytedance.com/ttwid/union/register/"
 OPEN_ORIGIN = "https://open.douyin.com"
 DEFAULT_REFERER = "https://www.douyin.com/"
 
+# 详情接口所需的 Web 客户端参数，缺失会被判为旧客户端并截断 desc。
+WEB_CLIENT_PARAMS = {
+    "device_platform": "webapp",
+    "aid": "6383",
+    "channel": "channel_pc_web",
+    "pc_client_type": "1",
+    "version_code": "290100",
+    "version_name": "29.1.0",
+    "cookie_enabled": "true",
+    "screen_width": "1920",
+    "screen_height": "1080",
+    "browser_language": "zh-CN",
+    "browser_platform": "Win32",
+    "browser_name": "Chrome",
+    "browser_version": "130.0.0.0",
+    "browser_online": "true",
+    "engine_name": "Blink",
+    "engine_version": "130.0.0.0",
+    "os_name": "Windows",
+    "os_version": "10",
+    "cpu_core_num": "12",
+    "device_memory": "8",
+    "platform": "PC",
+    "downlink": "10",
+    "effective_type": "4g",
+    "round_trip_time": "50",
+}
+
 DEFAULT_TTWID_TTL = 6 * 60 * 60
 IDENTITY_REFRESH_FAILURE_COOLDOWN = 1.0
 DETAIL_MAX_ATTEMPTS = 4
@@ -64,16 +92,11 @@ class DouyinAnonymousIdentity:
 
     @staticmethod
     def _build_params(item_id: str) -> dict:
-        return {
-            "device_platform": "webapp",
-            "aid": "6383",
-            "channel": "channel_pc_web",
-            "aweme_id": str(item_id),
-        }
+        return {**WEB_CLIENT_PARAMS, "aweme_id": str(item_id)}
 
     @staticmethod
     def _build_open_params(item_id: str) -> dict:
-        return {"aweme_id": str(item_id), "aid": "6383"}
+        return {**WEB_CLIENT_PARAMS, "aweme_id": str(item_id)}
 
     @staticmethod
     def _registration_payload() -> dict:

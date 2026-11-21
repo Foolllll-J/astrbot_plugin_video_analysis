@@ -22,8 +22,8 @@ def extract_douyin_cookies(full_cookie_string: str) -> tuple[str, bool, dict[str
 
     cookie_dict = {}
     if "=" in full_cookie_string:
-        pairs = full_cookie_string.replace(" ", "").split(";")
-        for pair in pairs:
+        for pair in full_cookie_string.split(";"):
+            pair = pair.strip()
             if "=" in pair:
                 name, value = pair.split("=", 1)
                 cookie_dict[name.strip()] = value.strip()
@@ -36,8 +36,11 @@ def extract_douyin_cookies(full_cookie_string: str) -> tuple[str, bool, dict[str
     critical_missing = [f for f in critical_fields if f in missing_fields]
     is_valid = len(critical_missing) == 0
 
-    cookie_pairs = [f"{name}={extracted.get(name, 'xxx')}" for name in required_cookies]
-    formatted_cookie = ";".join(cookie_pairs) + ";"
+    # 原样透传，避免丢失 UIFID / s_v_web_id / msToken 等风控字段
+    cookie_pairs = [
+        f"{name}={value}" for name, value in cookie_dict.items() if name and value
+    ]
+    formatted_cookie = ";".join(cookie_pairs) + ";" if cookie_pairs else ""
 
     return formatted_cookie, is_valid, extracted
 
