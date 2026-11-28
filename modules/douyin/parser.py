@@ -16,7 +16,7 @@ import aiofiles
 import httpx
 
 from astrbot.api import logger
-from astrbot.api.message_components import Node, Plain, Nodes
+from astrbot.api.message_components import Node, Plain
 import astrbot.api.message_components as Comp
 from astrbot.api.event import AstrMessageEvent
 
@@ -200,9 +200,7 @@ async def send_douyin_with_title_forward(
 ) -> None:
     """标题超长时组合转发；await 实际发送，支持重试。"""
     from ..send_utils import (
-        deliver_items,
-        finish_delivery_report,
-        send_chain_with_retry,
+        send_nodes_with_fallback,
         send_plain,
     )
 
@@ -258,55 +256,14 @@ async def send_douyin_with_title_forward(
     ]
     all_nodes = [title_node] + media_nodes
 
-    if event.get_platform_name() == "aiocqhttp":
-        merged = Nodes(nodes=all_nodes)
-        ok = await send_chain_with_retry(
-            event,
-            [merged],
-            attempts=2,
-            delay=1,
-            label="标题转发",
-            logger_obj=logger,
-        )
-        if ok:
-            logger.debug(f"标题转发成功：{len(media_nodes)} 个媒体（合并转发）")
-            report = "ok"
-        else:
-            logger.warning("标题转发合并失败，降级为标题 + 逐项媒体发送")
-            await send_plain(event, title, attempts=1, delay=0, logger_obj=logger)
-            succeeded, _ = await deliver_items(
-                event,
-                media_contents,
-                attempts=2,
-                delay=1,
-                label="标题转发媒体",
-                logger_obj=logger,
-            )
-            report = await finish_delivery_report(
-                event,
-                succeeded=succeeded,
-                total=len(media_contents),
-                label="标题转发媒体",
-                logger_obj=logger,
-            )
-    else:
-        logger.debug("当前平台不支持合并转发，标题转发降级为依次发送")
-        await send_plain(event, title, attempts=1, delay=0, logger_obj=logger)
-        succeeded, _ = await deliver_items(
-            event,
-            media_contents,
-            attempts=2,
-            delay=1,
-            label="标题转发媒体",
-            logger_obj=logger,
-        )
-        report = await finish_delivery_report(
-            event,
-            succeeded=succeeded,
-            total=len(media_contents),
-            label="标题转发媒体",
-            logger_obj=logger,
-        )
+    report = await send_nodes_with_fallback(
+        event,
+        all_nodes,
+        attempts=2,
+        delay=1,
+        label="标题转发",
+        logger_obj=logger,
+    )
 
     if set_emoji_fn:
         await set_emoji_fn(424, False)

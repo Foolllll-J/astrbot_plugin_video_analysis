@@ -1,4 +1,4 @@
-from astrbot.api.message_components import Node, Plain, Image, Nodes
+from astrbot.api.message_components import Node, Plain, Image
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from astrbot.api import logger
@@ -16,9 +16,8 @@ from datetime import datetime
 
 from .modules.download_io import DownloadLimitExceeded, SizePrecheckExceeded
 from .modules.send_utils import (
-    deliver_items,
-    finish_delivery_report,
     send_chain_with_retry,
+    send_nodes_with_fallback,
     send_plain,
 )
 from .modules.auto_delete import (
@@ -1035,7 +1034,7 @@ class videoAnalysis(Star):
             result = await downloader.download(parse_result, url)
 
         if result.get("error"):
-            logger.warning(f"小红书下载失败: {result['error']}")
+            logger.warning(f"贴吧下载失败: {result['error']}")
             if not self.enable_emoji_reaction:
                 yield event.plain_result("抱歉，无法下载内容。")
             await self._set_emoji(event, 424, False)
@@ -1125,7 +1124,7 @@ class videoAnalysis(Star):
             )
             nodes.append(reply_node)
 
-        if len(nodes) <= 1:
+        if not nodes:
             logger.warning("贴吧：没有构建出任何消息节点")
             if not self.enable_emoji_reaction:
                 yield event.plain_result("抱歉，无法构建消息内容。")
@@ -1133,53 +1132,14 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
             return
 
-        if event.get_platform_name() == "aiocqhttp":
-            merged = Nodes(nodes=nodes)
-            ok = await send_chain_with_retry(
-                event,
-                [merged],
-                attempts=2,
-                delay=1,
-                label="贴吧合并转发",
-                logger_obj=logger,
-            )
-            if ok:
-                logger.debug(f"贴吧合并转发成功：{len(nodes)} 个节点")
-                report = "ok"
-            else:
-                logger.warning("贴吧合并转发失败，降级为逐节点发送")
-                succeeded, _ = await deliver_items(
-                    event,
-                    [node.content for node in nodes],
-                    attempts=2,
-                    delay=1,
-                    label="贴吧内容",
-                    logger_obj=logger,
-                )
-                report = await finish_delivery_report(
-                    event,
-                    succeeded=succeeded,
-                    total=len(nodes),
-                    label="贴吧内容",
-                    logger_obj=logger,
-                )
-        else:
-            logger.debug("当前平台不支持合并转发，贴吧降级为依次发送")
-            succeeded, _ = await deliver_items(
-                event,
-                [node.content for node in nodes],
-                attempts=2,
-                delay=1,
-                label="贴吧内容",
-                logger_obj=logger,
-            )
-            report = await finish_delivery_report(
-                event,
-                succeeded=succeeded,
-                total=len(nodes),
-                label="贴吧内容",
-                logger_obj=logger,
-            )
+        report = await send_nodes_with_fallback(
+            event,
+            nodes,
+            attempts=2,
+            delay=1,
+            label="贴吧内容",
+            logger_obj=logger,
+        )
 
         await self._set_emoji(event, 424, False)
         await self._set_emoji(event, 357 if report == "failed" else 124)
@@ -1300,55 +1260,14 @@ class videoAnalysis(Star):
                     logger.warning(f"NGA 回复媒体处理出错: {e}")
             nodes.append(Node(uin=sender_id, name="NGA内容", content=reply_contents))
 
-        if len(nodes) <= 1:
-            logger.warning("NGA：没有构建出任何消息节点")
-
-        if event.get_platform_name() == "aiocqhttp":
-            merged = Nodes(nodes=nodes)
-            ok = await send_chain_with_retry(
-                event,
-                [merged],
-                attempts=2,
-                delay=1,
-                label="NGA 合并转发",
-                logger_obj=logger,
-            )
-            if ok:
-                report = "ok"
-            else:
-                logger.warning("NGA 合并转发失败，降级为逐节点发送")
-                succeeded, _ = await deliver_items(
-                    event,
-                    [node.content for node in nodes],
-                    attempts=2,
-                    delay=1,
-                    label="NGA内容",
-                    logger_obj=logger,
-                )
-                report = await finish_delivery_report(
-                    event,
-                    succeeded=succeeded,
-                    total=len(nodes),
-                    label="NGA内容",
-                    logger_obj=logger,
-                )
-        else:
-            logger.debug("当前平台不支持合并转发，NGA 降级为依次发送")
-            succeeded, _ = await deliver_items(
-                event,
-                [node.content for node in nodes],
-                attempts=2,
-                delay=1,
-                label="NGA内容",
-                logger_obj=logger,
-            )
-            report = await finish_delivery_report(
-                event,
-                succeeded=succeeded,
-                total=len(nodes),
-                label="NGA内容",
-                logger_obj=logger,
-            )
+        report = await send_nodes_with_fallback(
+            event,
+            nodes,
+            attempts=2,
+            delay=1,
+            label="NGA内容",
+            logger_obj=logger,
+        )
 
         await self._set_emoji(event, 424, False)
         await self._set_emoji(event, 357 if report == "failed" else 124)
@@ -1357,7 +1276,7 @@ class videoAnalysis(Star):
     async def _send_douyin_multimedia(
         self, event: AstrMessageEvent, result: dict, sender_name: str = "抖音内容"
     ) -> None:
-        """发送抖音多媒体：部分失败继续发送剩余项，只重试失败项。"""
+        """发送抖音多媒体：合并转发优先，失败时按预算打包重发。"""
         ordered_media = list(result.get("ordered_media", []) or [])
 
         # 兼容旧版本或 API 返回的格式
@@ -1458,62 +1377,17 @@ class videoAnalysis(Star):
             await self._set_emoji(event, 357)
             return
 
-        if event.get_platform_name() != "aiocqhttp":
-            logger.debug("当前平台不支持合并转发，已降级为逐条发送抖音多媒体。")
-            succeeded, _ = await deliver_items(
-                event,
-                contents,
-                attempts=MAX_SEND_RETRIES + 1,
-                delay=2,
-                label="图集",
-                logger_obj=logger,
-            )
-            report = await finish_delivery_report(
-                event,
-                succeeded=succeeded,
-                total=len(contents),
-                label="图集",
-                logger_obj=logger,
-            )
-            await self._set_emoji(event, 424, False)
-            await self._set_emoji(event, 357 if report == "failed" else 124)
-            return
-
-        logger.debug(f"准备发送 {len(contents)} 个媒体文件（保持顺序，合并转发）")
+        logger.debug(f"准备发送 {len(contents)} 个媒体文件（保持顺序）")
         sender_id = event.get_self_id()
-        forward_nodes = [
+        nodes = [
             Node(uin=sender_id, name=sender_name, content=content)
             for content in contents
         ]
-        merged = Nodes(nodes=forward_nodes)
-        ok = await send_chain_with_retry(
+        report = await send_nodes_with_fallback(
             event,
-            [merged],
-            attempts=2,
-            delay=1,
-            label="图集合并转发",
-            logger_obj=logger,
-        )
-        if ok:
-            logger.debug(f"成功发送 {len(forward_nodes)} 个媒体文件（合并转发）")
-            await self._set_emoji(event, 424, False)
-            await self._set_emoji(event, 124)
-            return
-
-        # 合并转发失败：逐项发送，避免整组丢失；只重试失败项
-        logger.warning("图集合并转发失败，降级为逐项发送")
-        succeeded, _ = await deliver_items(
-            event,
-            contents,
-            attempts=2,
-            delay=1,
-            label="图集",
-            logger_obj=logger,
-        )
-        report = await finish_delivery_report(
-            event,
-            succeeded=succeeded,
-            total=len(contents),
+            nodes,
+            attempts=MAX_SEND_RETRIES + 1,
+            delay=2,
             label="图集",
             logger_obj=logger,
         )
